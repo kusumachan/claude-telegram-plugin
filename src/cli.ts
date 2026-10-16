@@ -134,11 +134,18 @@ export function parseSetting(key: string, value: string): unknown {
       return value
     case 'notify':
     case 'notifyPreview':
+    case 'approvals':
       if (value !== 'on' && value !== 'off') throw new CliError(`${key} must be on or off`)
       return value
     case 'notifyStopAfterSeconds': {
       const n = Number(value)
       if (!Number.isInteger(n) || n < 0) throw new CliError(`${key} must be a non-negative integer (0 = every turn)`)
+      return n
+    }
+    case 'approvalTimeoutSeconds': {
+      const n = Number(value)
+      // Claude Code kills a command hook after 600s; leave headroom.
+      if (!Number.isInteger(n) || n < 10 || n > 540) throw new CliError(`${key} must be an integer between 10 and 540`)
       return n
     }
     case 'textChunkLimit':
@@ -168,7 +175,7 @@ export function parseSetting(key: string, value: string): unknown {
     }
     default:
       throw new CliError(
-        `unknown key ${key}. Supported: ackReaction, replyToMode, chunkMode, textChunkLimit, maxPending, mentionPatterns, notify, notifyStopAfterSeconds, notifyPreview`,
+        `unknown key ${key}. Supported: ackReaction, replyToMode, chunkMode, textChunkLimit, maxPending, mentionPatterns, notify, notifyStopAfterSeconds, notifyPreview, approvals, approvalTimeoutSeconds`,
       )
   }
 }
@@ -189,7 +196,7 @@ function status(a: Access, now: number): string {
   for (const [id, g] of groups) {
     lines.push(`  ${id}  requireMention=${g.requireMention}  allowFrom=${g.allowFrom.join(',') || 'any'}`)
   }
-  const extras = (['ackReaction', 'replyToMode', 'chunkMode', 'textChunkLimit', 'maxPending', 'mentionPatterns', 'notify', 'notifyStopAfterSeconds', 'notifyPreview'] as const)
+  const extras = (['ackReaction', 'replyToMode', 'chunkMode', 'textChunkLimit', 'maxPending', 'mentionPatterns', 'notify', 'notifyStopAfterSeconds', 'notifyPreview', 'approvals', 'approvalTimeoutSeconds'] as const)
     .filter(k => a[k] !== undefined)
     .map(k => `${k}: ${JSON.stringify(a[k])}`)
   if (extras.length) lines.push(...extras)

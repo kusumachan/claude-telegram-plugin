@@ -41,6 +41,10 @@ export type Access = {
   notifyStopAfterSeconds?: number
   /** Include the start of Claude's final message in "finished" notices. Default: 'on'. */
   notifyPreview?: 'on' | 'off'
+  /** Approve permission prompts of non-channel sessions from Telegram (via the hub). Default: 'on'. */
+  approvals?: 'on' | 'off'
+  /** How long a Telegram approval prompt waits before leaving it to the terminal. Default: 300. */
+  approvalTimeoutSeconds?: number
 }
 
 export const PAIRING_TTL_MS = 60 * 60 * 1000

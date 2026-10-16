@@ -48,9 +48,11 @@ describe('decide', () => {
       ...base, hook_event_name: 'Notification', notification_type: 'permission_prompt',
       title: 'Permission needed', message: 'Claude needs your permission to use Bash',
     }
-    const d = decide(input, access, {}, T0)
+    const d = decide(input, { ...access, approvals: 'off' }, {}, T0)
     expect(d.send).toBe(true)
     if (d.send) expect(d.text).toBe('🔐 api · Permission needed\nClaude needs your permission to use Bash')
+    // With approvals on, the approval prompt replaces the plain notice.
+    expect(decide(input, access, {}, T0).send).toBe(false)
   })
 
   test('idle prompt right after a finished notice is suppressed', () => {

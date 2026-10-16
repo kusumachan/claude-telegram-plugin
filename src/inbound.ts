@@ -19,7 +19,8 @@ export type InboundDeps = {
   token: string
   inboxDir: string
   botUsername: () => string
-  deliver: (n: ChannelNotification) => Promise<void>
+  /** Hand a message to Claude. Resolves false when nobody received it (e.g. no session connected). */
+  deliver: (n: ChannelNotification) => Promise<boolean>
   log: (msg: string) => void
 }
 
@@ -230,7 +231,7 @@ async function handleInbound(deps: InboundDeps, ctx: Context, text: string, opts
   }
 
   try {
-    await deps.deliver({ content: text, meta: compact(meta) })
+    if (!(await deps.deliver({ content: text, meta: compact(meta) }))) deps.typing.stop(chatId, threadId)
   } catch (err) {
     deps.typing.stop(chatId, threadId)
     deps.log(`failed to deliver inbound to Claude: ${err}`)
@@ -408,7 +409,7 @@ async function handleChoiceTap(deps: InboundDeps, ctx: CallbackContext, data: st
     button_message_id: String(msg.message_id),
   }
   try {
-    await deps.deliver({ content: label, meta: compact(meta) })
+    if (!(await deps.deliver({ content: label, meta: compact(meta) }))) deps.typing.stop(chatId, threadId)
   } catch (err) {
     deps.typing.stop(chatId, threadId)
     deps.log(`failed to deliver button tap to Claude: ${err}`)

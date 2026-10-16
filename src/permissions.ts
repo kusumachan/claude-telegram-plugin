@@ -17,6 +17,8 @@ export type PermissionRequest = {
 
 type Entry = PermissionRequest & {
   createdAt: number
+  /** Which session asked, shown when several are connected (e.g. "api"). */
+  label?: string
   /** Every prompt we sent for this request, so all of them can be updated on resolve. */
   messages: { chatId: string; messageId: number }[]
 }
@@ -49,8 +51,8 @@ export class PermissionRelay {
     return this.pending.has(request_id)
   }
 
-  async request(req: PermissionRequest, recipients: string[], now = Date.now()): Promise<void> {
-    const entry: Entry = { ...req, createdAt: now, messages: [] }
+  async request(req: PermissionRequest, recipients: string[], now = Date.now(), label?: string): Promise<void> {
+    const entry: Entry = { ...req, createdAt: now, label, messages: [] }
     this.pending.set(req.request_id, entry)
     const keyboard = new InlineKeyboard()
       .text('See more', `perm:more:${req.request_id}`)
@@ -58,7 +60,7 @@ export class PermissionRelay {
       .text('❌ Deny', `perm:deny:${req.request_id}`)
     await Promise.all(recipients.map(async chatId => {
       try {
-        const sent = await this.api.sendMessage(chatId, summary(req), { reply_markup: keyboard })
+        const sent = await this.api.sendMessage(chatId, summary(entry), { reply_markup: keyboard })
         entry.messages.push({ chatId, messageId: sent.message_id })
       } catch (e) {
         this.log(`permission_request send to ${chatId} failed: ${e}`)
@@ -94,6 +96,15 @@ export class PermissionRelay {
     await this.closePrompts(e, label)
   }
 
+  /** Close a request without a verdict, e.g. it was answered in the terminal. */
+  async cancel(request_id: string, label: string): Promise<boolean> {
+    const e = this.pending.get(request_id)
+    if (!e) return false
+    this.pending.delete(request_id)
+    await this.closePrompts(e, label)
+    return true
+  }
+
   /** Drop stale requests (answered in the terminal, or abandoned). */
   async prune(now = Date.now()): Promise<void> {
     for (const [id, e] of this.pending) {
@@ -111,6 +122,17 @@ export class PermissionRelay {
   }
 }
 
-function summary(req: PermissionRequest): string {
-  return `🔐 Permission: ${req.tool_name}`
+function summary(e: PermissionRequest & { label?: string }): string {
+  return `🔐 ${e.label ? `[${e.label}] ` : ''}Permission: ${e.tool_name}`
+}
+
+const ID_ALPHABET = 'abcdefghijkmnopqrstuvwxyz' // a-z minus 'l', same as Claude Code
+
+/** A request id in Claude Code's format, for prompts that come from hooks. */
+export function newRequestId(taken: (id: string) => boolean): string {
+  for (;;) {
+    let id = ''
+    for (let i = 0; i < 5; i++) id += ID_ALPHABET[Math.floor(Math.random() * ID_ALPHABET.length)]
+    if (!taken(id)) return id
+  }
 }

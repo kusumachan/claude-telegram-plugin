@@ -90,6 +90,10 @@ export function decide(input: HookInput, access: Access, state: SessionState, no
     case 'Notification': {
       const type = input.notification_type ?? ''
       if (!ATTENTION_TYPES.has(type)) return { send: false, reason: `ignored type ${type}` }
+      // With approvals on, the PermissionRequest hook already sent buttons.
+      if (type === 'permission_prompt' && access.approvals !== 'off') {
+        return { send: false, reason: 'approval prompt sent instead' }
+      }
       // "Waiting for your input" right after we said it finished is a repeat.
       if (type === 'idle_prompt' && state.stopNotifiedAt && state.stopNotifiedAt >= (state.turnStart ?? 0)) {
         return { send: false, reason: 'idle after finished notice' }

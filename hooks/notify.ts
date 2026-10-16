@@ -1,14 +1,17 @@
 #!/usr/bin/env bun
 /**
- * Hook entry point: reads the hook input JSON from stdin and, when warranted,
- * sends a short Telegram message to every allowlisted user.
+ * Notification hook (UserPromptSubmit / Notification / Stop, async): tells
+ * allowlisted users on Telegram when a session needs attention or finished a
+ * long turn, and tells the hub when a turn boundary means any open approval
+ * prompt for this session was answered at the terminal.
  *
- * Runs as an async hook, so it never blocks Claude. It must never fail
- * loudly either: any problem (no token, Telegram down) is logged to stderr
- * and the hook exits 0.
+ * Never blocks Claude and never fails loudly: problems go to stderr, exit 0.
  */
+import { join } from 'path'
 import { AccessStore } from '../src/access.ts'
+import { isChannelSession } from '../src/channel-mode.ts'
 import { loadEnvFile, STATE_DIR } from '../src/config.ts'
+import { HubClient } from '../src/hub/client.ts'
 import {
   decide,
   type HookInput,
@@ -17,18 +20,24 @@ import {
   readSessionState,
   writeSessionState,
 } from '../src/notify.ts'
-import { isChannelSession } from '../src/channel-mode.ts'
-
-const SEND_TIMEOUT_MS = 10_000
-// Overridable for end-to-end tests against a local fake Bot API.
-const API_ROOT = process.env.TELEGRAM_API_ROOT ?? 'https://api.telegram.org'
+import { readHookInput, sendDirect } from './common.ts'
 
 async function main(): Promise<void> {
-  const input = JSON.parse(await Bun.stdin.text()) as HookInput
+  const input = await readHookInput<HookInput>()
   if (!input.session_id) return
 
-  // The channel session already talks over Telegram (and relays permission
-  // prompts natively), so a hook message there would be a duplicate.
+  // Turn boundary → close this session's open Telegram approval prompts.
+  // Applies to channel sessions too (their relayed prompts live in the hub).
+  if (input.hook_event_name === 'Stop' || input.hook_event_name === 'UserPromptSubmit') {
+    const hub = new HubClient(STATE_DIR, join(import.meta.dir, '../hub.ts'))
+    if (await hub.healthy(300)) {
+      await hub.post('/hook/event', { session_id: input.session_id, hook_event_name: input.hook_event_name }, 2000)
+        .catch(() => {})
+    }
+  }
+
+  // The channel session already talks over Telegram, so a notice there
+  // would be a duplicate.
   if (isChannelSession()) return
 
   loadEnvFile()
@@ -42,21 +51,7 @@ async function main(): Promise<void> {
   const decision = decide(input, access, state)
   if (decision.state) writeSessionState(STATE_DIR, input.session_id, decision.state)
   if (input.hook_event_name === 'UserPromptSubmit') pruneSessionState(STATE_DIR)
-  if (!decision.send) return
-
-  await Promise.all(access.allowFrom.map(async chatId => {
-    try {
-      const res = await fetch(`${API_ROOT}/bot${token}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: decision.text, disable_web_page_preview: true }),
-        signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
-      })
-      if (!res.ok) process.stderr.write(`telegram notify to ${chatId}: HTTP ${res.status}\n`)
-    } catch (err) {
-      process.stderr.write(`telegram notify to ${chatId} failed: ${err}\n`)
-    }
-  }))
+  if (decision.send) await sendDirect(token, access.allowFrom, decision.text)
 }
 
 await main().catch(err => process.stderr.write(`telegram notify hook: ${err}\n`))

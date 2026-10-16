@@ -108,7 +108,12 @@ export type ToolDeps = {
   typing: TypingTracker
 }
 
-type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
+export type ToolResult = {
+  content: { type: 'text'; text: string }[]
+  isError?: boolean
+  /** Message ids reply sent, so the hub can route replies-to-them back to this session. Stripped before MCP. */
+  sentIds?: number[]
+}
 
 function ok(text: string): ToolResult {
   return { content: [{ type: 'text', text }] }
@@ -235,7 +240,7 @@ async function reply(deps: ToolDeps, args: Record<string, unknown>): Promise<Too
   const head = sentIds.length === 1
     ? `sent (id: ${sentIds[0]})`
     : `sent ${sentIds.length} messages (ids: ${sentIds.join(', ')})`
-  return ok([head, ...notes].join('\n'))
+  return { ...ok([head, ...notes].join('\n')), sentIds }
 }
 
 async function editMessage(deps: ToolDeps, args: Record<string, unknown>): Promise<ToolResult> {

@@ -1,5 +1,5 @@
 {
-  "description": "Telegram notifications when a Claude Code session needs attention or finishes a long turn",
+  "description": "Telegram notifications and approvals for Claude Code sessions",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -31,6 +31,17 @@
             "type": "command",
             "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/notify.ts\"",
             "async": true
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/permission.ts\"",
+            "timeout": 600
           }
         ]
       }

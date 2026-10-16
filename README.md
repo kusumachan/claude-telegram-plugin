@@ -32,6 +32,30 @@ Based on the official [`telegram` plugin](https://github.com/anthropics/claude-p
 > Run multiple bots by pointing `TELEGRAM_STATE_DIR` at a different directory per instance.
 > State lives in `channels/telegram-plus`, separate from the official plugin — don't run both on the same token (Telegram allows one poller per token).
 
+## How it fits together
+
+```
+Telegram ⇄ hub (one per bot: polls, routes, relays approvals; unix socket in the state dir)
+             ⇅ channel session "api"  (bin/claude-telegram in ~/code/api)
+             ⇅ channel session "web"  (bin/claude-telegram in ~/code/web)
+             ⇐ hooks from any other session: notifications + approvals
+```
+
+- **The hub** (`hub.ts`) is the only process that talks to Telegram's `getUpdates`, so any number of sessions can share one bot without 409 conflicts. It starts automatically the first time something needs it and exits after 10 minutes with nothing connected. Log: `<state-dir>/hub.log`.
+- **Channel sessions** are started with `bin/claude-telegram`. Each registers with the hub under its project folder name (override with `TELEGRAM_PLUS_NAME=...`).
+- **Every other session** with the plugin enabled is tools-only, and gets notifications and Telegram approvals through hooks.
+
+## Multiple sessions
+
+With several channel sessions connected, the hub decides where each message goes:
+
+1. A **reply** to a message a session sent goes back to that session.
+2. Otherwise it goes to the chat's **active** session: `/use api`, or tap one under `/sessions`.
+3. With only **one** session connected, it goes there.
+4. Otherwise the hub holds the message and asks *"Which session should get this?"* with a button per session.
+
+Replies are prefixed with the session name (`[api] …`) whenever more than one is connected.
+
 ## Tools exposed to the assistant
 
 | Tool | Purpose |
@@ -57,14 +81,23 @@ Each message arrives as a `<channel>` notification with meta including `chat_id`
 
 The typing indicator stays on while Claude works (refreshed every 4s, up to 3 min or until the reply). Inbox files older than 7 days are cleaned up automatically.
 
-## Notifications from any session
+## Notifications and approvals from any session
 
-The plugin ships [hooks](https://code.claude.com/docs/en/hooks) that message every allowlisted user when a session **outside** the channel session:
+The plugin ships [hooks](https://code.claude.com/docs/en/hooks) that work in every session where it's enabled, not only channel sessions.
+
+**Approvals.** When a session (other than a channel session, which uses Claude Code's native relay) hits a permission prompt, allowlisted users get `🔐 [project] Permission: Bash` with **See more / Allow / Deny** buttons in their DM. The terminal dialog stays open at the same time, and whichever answer comes first wins. If you answer at the terminal, the Telegram prompt closes when the turn ends. With no answer within `approvalTimeoutSeconds` (default 300), the decision is left to the terminal.
+
+```
+/telegram-plus:access set approvals off                 # notify only, no buttons
+/telegram-plus:access set approvalTimeoutSeconds 120
+```
+
+**Notifications** go to every allowlisted user when a session outside the channel session:
 
 - needs attention: a permission prompt, a question, or idle waiting for input (`🔐` / `⏳`)
 - finished a turn that took at least `notifyStopAfterSeconds` (default 60s), with the start of Claude's last message (`✅`)
 
-The channel session itself is skipped, since there Claude already talks to you on Telegram. Hooks run async and never block Claude. Approving a permission from Telegram for these sessions isn't supported yet; that needs the multi-session hub. For now you're told the session is waiting.
+The channel session itself is skipped, since there Claude already talks to you on Telegram. Notification hooks run async and never block Claude. With approvals on, the approval prompt replaces the plain "needs permission" notice.
 
 ```
 /telegram-plus:access set notify off                  # disable
@@ -82,14 +115,17 @@ See [ACCESS.md](./ACCESS.md).
 
 ```sh
 bun install
-bun test          # unit tests
+bun test          # unit + hub integration tests (fake Bot API)
 bun run typecheck # tsc --noEmit
 ```
 
 `@modelcontextprotocol/sdk` is pinned to an exact version on purpose: Claude Code doesn't register a channel server that negotiates MCP protocol revision `2026-07-28`. The pinned SDK negotiates `2025-11-25`. Check the protocol version before bumping it.
 
 ```
-server.ts            entry: MCP server, lifecycle, polling loop
+hub.ts               the hub: polling, routing, approvals, local API
+server.ts            MCP server: hub client (channel) or direct tools-only
+src/hub/router.ts    which session gets a message
+src/hub/client.ts    hub socket, auto-start, wire types
 src/access.ts        access.json store (locked read-modify-write)
 src/lock.ts          cross-process mkdir lock
 src/gate.ts          inbound gate + mention detection
@@ -103,7 +139,7 @@ src/files.ts         downloads, sendable check, inbox cleanup
 src/cli.ts           access CLI used by the /access skill
 src/channel-mode.ts  detects the launcher-started channel session
 src/notify.ts        notification-hook decisions
-hooks/               hooks.json + notify.ts entry point
+hooks/               hooks.json, notify.ts, permission.ts
 bin/claude-telegram  launcher for the channel session
 ```
 
@@ -125,6 +161,8 @@ bin/claude-telegram  launcher for the channel session
 - Permission-reply ack uses 👍/👎. Upstream's ✅/❌ aren't in Telegram's reaction whitelist and silently failed.
 
 **Features**
+- Several sessions on one bot through the hub, with `/sessions`, `/use` and reply-based routing
+- Approve permission prompts from Telegram for any session, not just the channel one
 - Notification hooks: Telegram ping when any other session needs attention or finishes a long turn
 - Forum topics (`thread_id` in and out)
 - Reply/quote context, forwarded-from, edited messages, albums, locations, contacts
