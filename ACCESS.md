@@ -77,7 +77,7 @@ In groups with `requireMention: true`, any of the following triggers the bot:
 
 Configure outbound behavior with `/telegram-plus:access set <key> <value>`.
 
-**`notify`** (`on`/`off`), **`notifyStopAfterSeconds`** (default 60, `0` = every turn) and **`notifyPreview`** (`on`/`off`) control the notification hooks. **`approvals`** (`on`/`off`) and **`approvalTimeoutSeconds`** (10–540, default 300) control approving permission prompts from Telegram. See the README.
+**`notify`** (`on`/`off`), **`notifyStopAfterSeconds`** (default 60, `0` = every turn) and **`notifyPreview`** (`on`/`off`) control the notification hooks. **`approvals`** (`on`/`off`) and **`approvalTimeoutSeconds`** (10–540, default 300) control approving permission prompts from Telegram. **`topicsGroup`** (a `-100…` group already added with `group add`) gives every project its own forum topic; `set topicsGroup ""` turns it off. See the README.
 
 **`maxPending`** caps how many pairing codes can be outstanding at once (default 10). Each stranger holds at most one code for 1h.
 
@@ -108,7 +108,7 @@ Configure outbound behavior with `/telegram-plus:access set <key> <value>`.
 | `/telegram-plus:access policy allowlist` | Set `dmPolicy`. Values: `pairing`, `allowlist`, `disabled`. |
 | `/telegram-plus:access group add -1001654782309` | Enable a group. Flags: `--no-mention` (also requires disabling privacy mode), `--allow id1,id2`. |
 | `/telegram-plus:access group rm -1001654782309` | Disable a group. |
-| `/telegram-plus:access set ackReaction 👀` | Set a config key: `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `maxPending`, `mentionPatterns`, `notify`, `notifyStopAfterSeconds`, `notifyPreview`, `approvals`, `approvalTimeoutSeconds`. |
+| `/telegram-plus:access set ackReaction 👀` | Set a config key: `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `maxPending`, `mentionPatterns`, `notify`, `notifyStopAfterSeconds`, `notifyPreview`, `approvals`, `approvalTimeoutSeconds`, `topicsGroup`. |
 
 ## Config file
 

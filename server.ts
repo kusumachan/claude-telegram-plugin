@@ -48,7 +48,7 @@ const CWD = process.env.CLAUDE_PROJECT_DIR ?? process.cwd()
 const SESSION_NAME = process.env.TELEGRAM_PLUS_NAME ?? basename(CWD)
 
 const mcp = new Server(
-  { name: 'telegram-plus', version: '0.2.0' },
+  { name: 'telegram-plus', version: '0.3.0' },
   {
     capabilities: {
       tools: {},

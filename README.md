@@ -56,6 +56,37 @@ With several channel sessions connected, the hub decides where each message goes
 
 Replies are prefixed with the session name (`[api] …`) whenever more than one is connected.
 
+## Forum topics: one topic per project
+
+Instead of switching with `/use`, give every project its own topic in a Telegram forum group:
+
+```
+Group "Claude" (Topics on)
+├─ api      ← talk to the api session; its approvals and notices land here
+├─ web      ← same for web
+└─ General  ← /sessions, picker, everything else
+```
+
+Setup:
+
+1. Create a group, turn on **Topics** (Group settings → Topics), add the bot and make it an **admin with "Manage Topics"**.
+2. In @BotFather: `/setprivacy` → your bot → **Disable** (so the bot sees every message in the topics), then remove and re-add the bot to the group.
+3. Get the group id (`-100…`). In [Telegram Web](https://web.telegram.org/a) it's in the URL after `#`. In Telegram Desktop, enable Settings → Advanced → Experimental → "Show Peer IDs in Profile".
+4. In Claude Code:
+   ```
+   /telegram-plus:access group add -100XXXXXXXXXX --no-mention --allow <your-telegram-id>
+   /telegram-plus:access set topicsGroup -100XXXXXXXXXX
+   ```
+
+What happens:
+
+- When a channel session connects, the hub creates a topic named after it, or reuses the existing one (`<state-dir>/topics.json`). Messages in that topic always go to that session. If it isn't running, the bot says so.
+- Approval prompts and notices from any session (including `claude --bg` workers and worktrees) go to their project's topic, created on first use. Only allowlisted users can tap Allow/Deny there.
+- Replies in a session's own topic skip the `[name]` prefix.
+- If the bot can't create topics (no admin rights, Topics off), it logs why in `hub.log` and falls back to DMs. A topic deleted in Telegram is recreated on next use.
+
+Everyone in the group can read what's posted there, including approval prompts with command previews. Keep the topics group to yourself or people you trust.
+
 ## Tools exposed to the assistant
 
 | Tool | Purpose |
@@ -126,6 +157,7 @@ hub.ts               the hub: polling, routing, approvals, local API
 server.ts            MCP server: hub client (channel) or direct tools-only
 src/hub/router.ts    which session gets a message
 src/hub/client.ts    hub socket, auto-start, wire types
+src/topics.ts        forum topic per project (topics.json)
 src/access.ts        access.json store (locked read-modify-write)
 src/lock.ts          cross-process mkdir lock
 src/gate.ts          inbound gate + mention detection
@@ -162,6 +194,7 @@ bin/claude-telegram  launcher for the channel session
 
 **Features**
 - Several sessions on one bot through the hub, with `/sessions`, `/use` and reply-based routing
+- One forum topic per project: routing, approvals and notices per topic
 - Approve permission prompts from Telegram for any session, not just the channel one
 - Notification hooks: Telegram ping when any other session needs attention or finishes a long turn
 - Forum topics (`thread_id` in and out)

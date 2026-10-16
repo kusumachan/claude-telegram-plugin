@@ -10,6 +10,9 @@ export class FakeTelegram {
   private updates: object[] = []
   private nextUpdateId = 1
   private nextMessageId = 1000
+  private nextThreadId = 500
+  /** Forum topics the "user" deleted: posting there fails like real Telegram. */
+  deletedThreads = new Set<number>()
   private server: ReturnType<typeof Bun.serve>
   private waiters: (() => void)[] = []
 
@@ -40,6 +43,9 @@ export class FakeTelegram {
         if (method === 'getUpdates') return Response.json({ ok: true, result: await this.takeUpdates() })
         this.calls.push({ method, params })
         for (const w of this.waiters.splice(0)) w()
+        if (method === 'sendMessage' && this.deletedThreads.has(params.message_thread_id)) {
+          return Response.json({ ok: false, error_code: 400, description: 'Bad Request: message thread not found' })
+        }
         return Response.json({ ok: true, result: this.result(method, params) })
       },
     })
@@ -57,6 +63,8 @@ export class FakeTelegram {
     switch (method) {
       case 'getMe':
         return { id: 1, is_bot: true, first_name: 'Bot', username: 'test_bot' }
+      case 'createForumTopic':
+        return { message_thread_id: this.nextThreadId++, name: params.name, icon_color: 0 }
       case 'sendMessage':
         return {
           message_id: this.nextMessageId++,
@@ -89,6 +97,40 @@ export class FakeTelegram {
         ...(replyToMessageId != null
           ? { reply_to_message: { message_id: replyToMessageId, date: 0, chat: { id: userId, type: 'private' }, from: { id: 1, is_bot: true, first_name: 'Bot', username: 'test_bot' }, text: '…' } }
           : {}),
+      },
+    })
+  }
+
+  /** A message from `userId` in group `chatId`, optionally inside forum topic `threadId`. */
+  groupMsg(userId: number, chatId: number, text: string, threadId?: number): void {
+    this.updates.push({
+      update_id: this.nextUpdateId++,
+      message: {
+        message_id: this.nextMessageId++,
+        date: Math.floor(Date.now() / 1000),
+        chat: { id: chatId, type: 'supergroup', title: 'Claude', is_forum: true },
+        from: { id: userId, is_bot: false, first_name: 'User', username: `user${userId}` },
+        text,
+        ...(threadId != null ? { message_thread_id: threadId, is_topic_message: true } : {}),
+      },
+    })
+  }
+
+  /** A tap by `userId` on a bot message in group `chatId`. */
+  groupTap(userId: number, chatId: number, data: string, messageId: number): void {
+    this.updates.push({
+      update_id: this.nextUpdateId++,
+      callback_query: {
+        id: String(this.nextUpdateId),
+        from: { id: userId, is_bot: false, first_name: 'User' },
+        chat_instance: 'g',
+        data,
+        message: {
+          message_id: messageId,
+          date: Math.floor(Date.now() / 1000),
+          chat: { id: chatId, type: 'supergroup', title: 'Claude', is_forum: true },
+          text: '…',
+        },
       },
     })
   }

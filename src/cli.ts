@@ -90,7 +90,10 @@ export function run(argv: string[], stateDir = STATE_DIR, now = Date.now()): str
       }
       if (sub === 'rm' || sub === 'remove') {
         const id = need(groupId, 'group rm <groupId>')
-        store.update(a => { delete a.groups[id] })
+        store.update(a => {
+          delete a.groups[id]
+          if (a.topicsGroup === id) delete a.topicsGroup
+        })
         return `group ${id} disabled`
       }
       throw new CliError('usage: group add <groupId> [--no-mention] [--allow id1,id2] | group rm <groupId>')
@@ -101,10 +104,16 @@ export function run(argv: string[], stateDir = STATE_DIR, now = Date.now()): str
       const value = rest.slice(1).join(' ')
       const parsed = parseSetting(key, value)
       store.update(a => {
+        if (key === 'topicsGroup' && typeof parsed === 'string' && !(parsed in a.groups)) {
+          throw new CliError(`group ${parsed} isn't enabled — run: group add ${parsed} --allow <your-id>`)
+        }
         if (parsed === undefined) delete (a as Record<string, unknown>)[key]
         else (a as Record<string, unknown>)[key] = parsed
       })
-      return `${key} = ${JSON.stringify(parsed ?? null)}`
+      return `${key} = ${JSON.stringify(parsed ?? null)}` +
+        (key === 'topicsGroup' && parsed
+          ? '\nnote: Topics must be on in that group, and the bot must be an admin with "Manage Topics".'
+          : '')
     }
 
     default:
@@ -142,6 +151,10 @@ export function parseSetting(key: string, value: string): unknown {
       if (!Number.isInteger(n) || n < 0) throw new CliError(`${key} must be a non-negative integer (0 = every turn)`)
       return n
     }
+    case 'topicsGroup':
+      if (value === '""' || value === "''" || value === '') return undefined
+      if (!/^-100\d+$/.test(value)) throw new CliError('topicsGroup must be a supergroup id like -1001234567890')
+      return value
     case 'approvalTimeoutSeconds': {
       const n = Number(value)
       // Claude Code kills a command hook after 600s; leave headroom.
@@ -175,7 +188,7 @@ export function parseSetting(key: string, value: string): unknown {
     }
     default:
       throw new CliError(
-        `unknown key ${key}. Supported: ackReaction, replyToMode, chunkMode, textChunkLimit, maxPending, mentionPatterns, notify, notifyStopAfterSeconds, notifyPreview, approvals, approvalTimeoutSeconds`,
+        `unknown key ${key}. Supported: ackReaction, replyToMode, chunkMode, textChunkLimit, maxPending, mentionPatterns, notify, notifyStopAfterSeconds, notifyPreview, approvals, approvalTimeoutSeconds, topicsGroup`,
       )
   }
 }
@@ -196,7 +209,7 @@ function status(a: Access, now: number): string {
   for (const [id, g] of groups) {
     lines.push(`  ${id}  requireMention=${g.requireMention}  allowFrom=${g.allowFrom.join(',') || 'any'}`)
   }
-  const extras = (['ackReaction', 'replyToMode', 'chunkMode', 'textChunkLimit', 'maxPending', 'mentionPatterns', 'notify', 'notifyStopAfterSeconds', 'notifyPreview', 'approvals', 'approvalTimeoutSeconds'] as const)
+  const extras = (['ackReaction', 'replyToMode', 'chunkMode', 'textChunkLimit', 'maxPending', 'mentionPatterns', 'notify', 'notifyStopAfterSeconds', 'notifyPreview', 'approvals', 'approvalTimeoutSeconds', 'topicsGroup'] as const)
     .filter(k => a[k] !== undefined)
     .map(k => `${k}: ${JSON.stringify(a[k])}`)
   if (extras.length) lines.push(...extras)

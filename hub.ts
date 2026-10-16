@@ -34,8 +34,9 @@ import {
 import { Router, type SessionInfo } from './src/hub/router.ts'
 import { type ChannelNotification, registerInbound } from './src/inbound.ts'
 import { projectLabel } from './src/notify.ts'
-import { newRequestId, PermissionRelay } from './src/permissions.ts'
+import { newRequestId, type PermissionRequest, PermissionRelay, type Recipient } from './src/permissions.ts'
 import { callTool, type ToolDeps } from './src/tools.ts'
+import { TopicStore, topicName, topicWelcome } from './src/topics.ts'
 import { TypingTracker } from './src/typing.ts'
 
 const log = (msg: string) => process.stderr.write(`${new Date().toISOString()} hub: ${msg}\n`)
@@ -73,6 +74,12 @@ const typing = new TypingTracker((chatId, threadId) =>
   bot.api.sendChatAction(chatId, 'typing', threadId != null ? { message_thread_id: threadId } : undefined),
 )
 const router = new Router()
+const topics = new TopicStore(STATE_DIR)
+/** session id → its forum topic thread id, while connected. */
+const sessionTopics = new Map<string, number>()
+/** topic name → when creating/using it last failed (backoff, avoids log spam). */
+const topicFailures = new Map<string, number>()
+const TOPIC_RETRY_MS = 10 * 60 * 1000
 const toolDeps: ToolDeps = { api: bot.api, store, stateDir: STATE_DIR, inboxDir: INBOX_DIR, token: TOKEN, typing }
 
 let lastActivity = Date.now()
@@ -137,6 +144,47 @@ function previewInput(input: unknown): string {
   return s.length > 3000 ? `${s.slice(0, 3000)}…` : s
 }
 
+// --- forum topics --------------------------------------------------------------
+
+/** The configured topics group, if it's also enabled in `groups`. */
+function topicsGroupId(access: Access = store.load()): string | undefined {
+  const g = access.topicsGroup
+  return g && g in access.groups ? g : undefined
+}
+
+/** The topic for a session/project, created on first use. Undefined → use DMs. */
+async function topicFor(name: string): Promise<{ chatId: string; threadId: number } | undefined> {
+  const group = topicsGroupId()
+  if (!group) return undefined
+  const failedAt = topicFailures.get(name)
+  if (failedAt && Date.now() - failedAt < TOPIC_RETRY_MS) return undefined
+  try {
+    const { threadId, created } = await topics.ensure(group, name,
+      async n => (await bot.api.createForumTopic(group, n)).message_thread_id)
+    if (created) {
+      log(`created topic "${name}" (#${threadId}) in ${group}`)
+      await bot.api.sendMessage(group, topicWelcome(name), { message_thread_id: threadId }).catch(() => {})
+    }
+    return { chatId: group, threadId }
+  } catch (err) {
+    topicFailures.set(name, Date.now())
+    log(`can't use a topic for "${name}" in ${group} (${err}) — using DMs. Are Topics on, and is the bot an admin with Manage Topics?`)
+    return undefined
+  }
+}
+
+/** Send an approval prompt to the project's topic, or allowlisted DMs. */
+async function requestApproval(req: PermissionRequest, name: string | undefined, access: Access): Promise<void> {
+  const topic = name ? await topicFor(name) : undefined
+  const targets: Recipient[] = topic ? [topic] : access.allowFrom
+  const delivered = await relay.request(req, targets, Date.now(), name)
+  if (delivered === 0 && topic && name) {
+    // Topic deleted in Telegram: forget it (recreated next time), use DMs now.
+    topics.forget(topic.chatId, name)
+    await relay.request(req, access.allowFrom, Date.now(), name)
+  }
+}
+
 // --- routing inbound messages ---------------------------------------------
 
 const held = new Map<string, ChannelNotification[]>()
@@ -156,12 +204,22 @@ async function deliver(n: ChannelNotification): Promise<boolean> {
   touch()
   const chatId = n.meta.chat_id!
   const replyTo = n.meta.reply_to_message_id ?? n.meta.button_message_id
-  const route = router.route(chatId, replyTo != null ? Number(replyTo) : undefined)
+  const group = topicsGroupId()
+  const thread = n.meta.thread_id != null ? Number(n.meta.thread_id) : undefined
+  const topicSession = group && chatId === group && thread != null ? topics.nameFor(group, thread) : undefined
+  const route = router.route(chatId, replyTo != null ? Number(replyTo) : undefined, topicSession)
 
   if (route.kind === 'session') {
     if (push(route.session.id, { type: 'inbound', content: n.content, meta: n.meta })) return true
     router.remove(route.session.id) // stream died without us noticing
     return deliver(n)
+  }
+
+  if (route.kind === 'offline') {
+    await bot.api.sendMessage(chatId,
+      `${route.name} isn't connected right now. Start it with bin/claude-telegram in that project.`,
+      { message_thread_id: thread }).catch(() => {})
+    return false
   }
 
   if (route.kind === 'none') {
@@ -303,11 +361,13 @@ async function handle(req: Request): Promise<Response> {
             if (!push(id, { type: 'ping' })) clearInterval(ping)
           }, 20_000)
           log(`session connected: ${info.name} (${cwd})`)
+          void topicFor(info.name).then(t => { if (t) sessionTopics.set(id, t.threadId) })
         },
         cancel() {
           clearInterval(ping)
           if (streams.get(id)) {
             streams.delete(id)
+            sessionTopics.delete(id)
             router.remove(id)
             log(`session disconnected: ${info.name}`)
           }
@@ -321,8 +381,11 @@ async function handle(req: Request): Promise<Response> {
       const info = router.get(session)
       if (!info) return json({ content: [{ type: 'text', text: `${name} failed: session not connected to the hub` }], isError: true })
       const a = { ...(args ?? {}) }
-      // With several sessions on one bot, say who's talking.
-      if (name === 'reply' && router.size > 1 && typeof a.text === 'string' && a.text) {
+      // With several sessions on one bot, say who's talking — except in the
+      // session's own topic, where it's obvious.
+      const ownTopic = sessionTopics.get(session)
+      const inOwnTopic = ownTopic != null && a.chat_id === topicsGroupId() && Number(a.thread_id) === ownTopic
+      if (name === 'reply' && router.size > 1 && !inOwnTopic && typeof a.text === 'string' && a.text) {
         a.text = sessionPrefix(info.name, a.format) + a.text
       }
       const result = await callTool(toolDeps, name, a)
@@ -336,11 +399,10 @@ async function handle(req: Request): Promise<Response> {
       const p = body as PermissionRequestBody
       const info = router.get(p.session)
       channelRequests.set(p.request_id, p.session)
-      await relay.request(
+      await requestApproval(
         { request_id: p.request_id, tool_name: p.tool_name, description: p.description, input_preview: p.input_preview },
-        store.load().allowFrom,
-        Date.now(),
         info?.name,
+        store.load(),
       )
       return json({ ok: true })
     }
@@ -362,11 +424,10 @@ async function handle(req: Request): Promise<Response> {
       })
       // The hook process goes away if Claude Code moves on without it.
       req.signal.addEventListener('abort', () => finishHookRequest(id, '✔︎ Handled in the terminal'))
-      await relay.request(
+      await requestApproval(
         { request_id: id, tool_name: p.tool_name, description, input_preview: previewInput(p.tool_input) },
-        access.allowFrom,
-        Date.now(),
-        projectLabel(p.cwd),
+        topicName(projectLabel(p.cwd)),
+        access,
       )
       return json(await result)
     }

@@ -8,6 +8,9 @@ export const PERMISSION_CALLBACK_RE = /^perm:(allow|deny|more):([a-km-z]{5})$/
 
 export type PermissionBehavior = 'allow' | 'deny'
 
+/** A DM chat id, or a chat plus forum topic. */
+export type Recipient = string | { chatId: string; threadId?: number }
+
 export type PermissionRequest = {
   request_id: string
   tool_name: string
@@ -51,21 +54,28 @@ export class PermissionRelay {
     return this.pending.has(request_id)
   }
 
-  async request(req: PermissionRequest, recipients: string[], now = Date.now(), label?: string): Promise<void> {
+  /** Send the prompt; resolves to how many recipients actually got it. */
+  async request(req: PermissionRequest, recipients: Recipient[], now = Date.now(), label?: string): Promise<number> {
     const entry: Entry = { ...req, createdAt: now, label, messages: [] }
     this.pending.set(req.request_id, entry)
     const keyboard = new InlineKeyboard()
       .text('See more', `perm:more:${req.request_id}`)
       .text('✅ Allow', `perm:allow:${req.request_id}`)
       .text('❌ Deny', `perm:deny:${req.request_id}`)
-    await Promise.all(recipients.map(async chatId => {
+    await Promise.all(recipients.map(async r => {
+      const { chatId, threadId } = typeof r === 'string' ? { chatId: r, threadId: undefined } : r
       try {
-        const sent = await this.api.sendMessage(chatId, summary(entry), { reply_markup: keyboard })
+        const sent = await this.api.sendMessage(chatId, summary(entry), {
+          reply_markup: keyboard,
+          ...(threadId != null ? { message_thread_id: threadId } : {}),
+        })
         entry.messages.push({ chatId, messageId: sent.message_id })
       } catch (e) {
-        this.log(`permission_request send to ${chatId} failed: ${e}`)
+        this.log(`permission_request send to ${chatId}${threadId != null ? `#${threadId}` : ''} failed: ${e}`)
       }
     }))
+    if (entry.messages.length === 0) this.pending.delete(req.request_id)
+    return entry.messages.length
   }
 
   /** Full details for the "See more" button, or undefined if unknown/expired. */

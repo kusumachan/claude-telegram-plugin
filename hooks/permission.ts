@@ -14,7 +14,7 @@ import { isChannelSession } from '../src/channel-mode.ts'
 import { loadEnvFile, STATE_DIR } from '../src/config.ts'
 import { type HookPermissionBody, type HookPermissionResult, HubClient } from '../src/hub/client.ts'
 import { projectLabel } from '../src/notify.ts'
-import { readHookInput, sendDirect } from './common.ts'
+import { readHookInput, sendNotice } from './common.ts'
 
 type Input = HookPermissionBody & { hook_event_name: string }
 
@@ -45,7 +45,7 @@ async function main(): Promise<void> {
     // No hub, no buttons: at least say the session is waiting.
     process.stderr.write(`telegram approval hook: ${err}\n`)
     if (access.notify !== 'off') {
-      await sendDirect(token, access.allowFrom,
+      await sendNotice(token, access, projectLabel(input.cwd),
         `🔐 ${projectLabel(input.cwd)} · Permission needed\n${input.tool_name} is waiting for approval in the terminal.`)
     }
     return

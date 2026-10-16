@@ -45,6 +45,11 @@ export type Access = {
   approvals?: 'on' | 'off'
   /** How long a Telegram approval prompt waits before leaving it to the terminal. Default: 300. */
   approvalTimeoutSeconds?: number
+  /**
+   * Forum supergroup (already in `groups`) where each session/project gets its
+   * own topic. Notifications and approval prompts go there instead of DMs.
+   */
+  topicsGroup?: string
 }
 
 export const PAIRING_TTL_MS = 60 * 60 * 1000

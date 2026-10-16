@@ -4,9 +4,10 @@
  *
  * Order of precedence for a message in a chat:
  *   1. A reply to a message a session sent → that session.
- *   2. The chat's active session (picked with /use or the picker).
- *   3. Exactly one session connected → that one.
- *   4. None connected → nobody; several and no choice yet → ask the user.
+ *   2. Posted in a session's own forum topic → that session (or "offline").
+ *   3. The chat's active session (picked with /use or the picker).
+ *   4. Exactly one session connected → that one.
+ *   5. None connected → nobody; several and no choice yet → ask the user.
  */
 
 export type SessionInfo = {
@@ -20,6 +21,8 @@ export type Route =
   | { kind: 'session'; session: SessionInfo }
   | { kind: 'none' }
   | { kind: 'pick' }
+  /** Posted in the topic of a session that isn't connected right now. */
+  | { kind: 'offline'; name: string }
 
 const MAX_OWNED = 5000
 
@@ -92,10 +95,15 @@ export class Router {
     return id ? this.sessions.get(id) : undefined
   }
 
-  route(chatId: string, replyToMessageId?: number): Route {
+  /** `topicSession`: the session name owning the forum topic the message was posted in. */
+  route(chatId: string, replyToMessageId?: number, topicSession?: string): Route {
     if (replyToMessageId != null) {
       const owner = this.ownerOf(chatId, replyToMessageId)
       if (owner) return { kind: 'session', session: owner }
+    }
+    if (topicSession != null) {
+      const s = this.findByName(topicSession)
+      return s ? { kind: 'session', session: s } : { kind: 'offline', name: topicSession }
     }
     const active = this.activeFor(chatId)
     if (active) return { kind: 'session', session: active }
