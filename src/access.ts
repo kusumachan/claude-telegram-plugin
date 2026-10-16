@@ -35,6 +35,12 @@ export type Access = {
   chunkMode?: ChunkMode
   /** Max concurrent pending pairing codes. Default: 10. */
   maxPending?: number
+  /** Notification hooks (needs attention / finished). Default: 'on'. */
+  notify?: 'on' | 'off'
+  /** Only send "finished" for turns at least this long. 0 = every turn. Default: 60. */
+  notifyStopAfterSeconds?: number
+  /** Include the start of Claude's final message in "finished" notices. Default: 'on'. */
+  notifyPreview?: 'on' | 'off'
 }
 
 export const PAIRING_TTL_MS = 60 * 60 * 1000

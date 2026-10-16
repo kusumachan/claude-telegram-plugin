@@ -43,7 +43,7 @@ stderr — relay it as-is.
 | `policy <mode>` | `policy pairing\|allowlist\|disabled` |
 | `group add <groupId> [--no-mention] [--allow id1,id2]` | same |
 | `group rm <groupId>` | `group rm <groupId>` |
-| `set <key> <value>` | `set <key> <value>` — keys: `ackReaction`, `replyToMode` (off/first/all), `chunkMode` (length/newline), `textChunkLimit`, `maxPending`, `mentionPatterns` (JSON array of regexes). `set ackReaction ""` disables. |
+| `set <key> <value>` | `set <key> <value>` — keys: `ackReaction`, `replyToMode` (off/first/all), `chunkMode` (length/newline), `textChunkLimit`, `maxPending`, `mentionPatterns` (JSON array of regexes), `notify` (on/off), `notifyStopAfterSeconds` (0 = every turn), `notifyPreview` (on/off). `set ackReaction ""` disables. |
 
 Quote values that contain spaces or shell metacharacters, e.g.
 `set mentionPatterns '["^hey claude\\b"]'`.

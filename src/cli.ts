@@ -132,6 +132,15 @@ export function parseSetting(key: string, value: string): unknown {
     case 'chunkMode':
       if (!CHUNK_MODES.includes(value)) throw new CliError(`chunkMode must be one of: ${CHUNK_MODES.join(', ')}`)
       return value
+    case 'notify':
+    case 'notifyPreview':
+      if (value !== 'on' && value !== 'off') throw new CliError(`${key} must be on or off`)
+      return value
+    case 'notifyStopAfterSeconds': {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 0) throw new CliError(`${key} must be a non-negative integer (0 = every turn)`)
+      return n
+    }
     case 'textChunkLimit':
     case 'maxPending': {
       const n = Number(value)
@@ -159,7 +168,7 @@ export function parseSetting(key: string, value: string): unknown {
     }
     default:
       throw new CliError(
-        `unknown key ${key}. Supported: ackReaction, replyToMode, chunkMode, textChunkLimit, maxPending, mentionPatterns`,
+        `unknown key ${key}. Supported: ackReaction, replyToMode, chunkMode, textChunkLimit, maxPending, mentionPatterns, notify, notifyStopAfterSeconds, notifyPreview`,
       )
   }
 }
@@ -180,7 +189,7 @@ function status(a: Access, now: number): string {
   for (const [id, g] of groups) {
     lines.push(`  ${id}  requireMention=${g.requireMention}  allowFrom=${g.allowFrom.join(',') || 'any'}`)
   }
-  const extras = (['ackReaction', 'replyToMode', 'chunkMode', 'textChunkLimit', 'maxPending', 'mentionPatterns'] as const)
+  const extras = (['ackReaction', 'replyToMode', 'chunkMode', 'textChunkLimit', 'maxPending', 'mentionPatterns', 'notify', 'notifyStopAfterSeconds', 'notifyPreview'] as const)
     .filter(k => a[k] !== undefined)
     .map(k => `${k}: ${JSON.stringify(a[k])}`)
   if (extras.length) lines.push(...extras)

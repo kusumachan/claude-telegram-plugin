@@ -1,0 +1,11 @@
+#!/bin/sh
+# Start Claude Code with this plugin as a Telegram channel.
+#
+# The plugin's MCP server runs in every session where the plugin is enabled,
+# but only polls Telegram in the session started through this launcher.
+# exec keeps our PID, so TELEGRAM_PLUS_CHANNEL_PID is the claude process itself.
+#
+# Override the plugin reference with TELEGRAM_PLUS_PLUGIN if you installed it
+# from a different marketplace. Extra arguments go to claude.
+export TELEGRAM_PLUS_CHANNEL_PID=$$
+exec claude --dangerously-load-development-channels "${TELEGRAM_PLUS_PLUGIN:-plugin:telegram-plus@telegram-plus-dev}" "$@"

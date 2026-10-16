@@ -31,6 +31,7 @@ import {
 import { cleanInbox } from './src/files.ts'
 import { registerInbound } from './src/inbound.ts'
 import { PermissionRelay } from './src/permissions.ts'
+import { isChannelSession } from './src/channel-mode.ts'
 import { callTool, TOOL_DEFINITIONS, type ToolDeps } from './src/tools.ts'
 import { TypingTracker } from './src/typing.ts'
 
@@ -45,27 +46,36 @@ if (!TOKEN) {
   process.exit(1)
 }
 
-// Telegram allows exactly one getUpdates consumer per token. If a previous
-// session crashed its server.ts can survive as an orphan and hold the slot
-// forever, so every new session sees 409 Conflict. Kill any stale holder.
+// Claude Code starts this server in every session where the plugin is
+// enabled, and can't tell us whether the session registered it as a channel.
+// Only the session started via bin/claude-telegram polls; everywhere else we
+// stay tools-only so sessions don't fight over the bot token.
+const CHANNEL = isChannelSession()
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
-try {
-  const stale = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
-  if (stale > 1 && stale !== process.pid) {
-    process.kill(stale, 0)
-    // PID files race with OS PID recycling — verify the holder is actually a
-    // server.ts process before SIGTERM.
-    const cmd = execFileSync('ps', ['-p', String(stale), '-o', 'args='], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-    if (cmd.includes('server.ts')) {
-      log(`replacing stale poller pid=${stale}`)
-      process.kill(stale, 'SIGTERM')
+if (CHANNEL) {
+  // Telegram allows exactly one getUpdates consumer per token. If a previous
+  // session crashed its server.ts can survive as an orphan and hold the slot
+  // forever, so every new session sees 409 Conflict. Kill any stale holder.
+  try {
+    const stale = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
+    if (stale > 1 && stale !== process.pid) {
+      process.kill(stale, 0)
+      // PID files race with OS PID recycling — verify the holder is actually a
+      // server.ts process before SIGTERM.
+      const cmd = execFileSync('ps', ['-p', String(stale), '-o', 'args='], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+      if (cmd.includes('server.ts')) {
+        log(`replacing stale poller pid=${stale}`)
+        process.kill(stale, 'SIGTERM')
+      }
     }
-  }
-} catch {}
-writeFileSync(PID_FILE, String(process.pid))
+  } catch {}
+  writeFileSync(PID_FILE, String(process.pid))
+} else {
+  log('tools-only mode (not launched via bin/claude-telegram) — not polling Telegram')
+}
 
 // Last-resort safety net — without these the process dies silently on any
 // unhandled promise rejection.
@@ -139,6 +149,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req =>
 
 await mcp.connect(new StdioServerTransport())
 
+
 registerInbound({
   bot,
   store,
@@ -172,7 +183,7 @@ function checkApprovals(): void {
   }
 }
 
-if (!STATIC) setInterval(checkApprovals, 5000).unref()
+if (CHANNEL && !STATIC) setInterval(checkApprovals, 5000).unref()
 setInterval(() => void relay.prune(), 60_000).unref()
 const sweepInbox = () => {
   const n = cleanInbox(INBOX_DIR, INBOX_MAX_AGE_MS)
@@ -190,7 +201,7 @@ function shutdown(): void {
   log('shutting down')
   typing.stopAll()
   try {
-    if (parseInt(readFileSync(PID_FILE, 'utf8'), 10) === process.pid) rmSync(PID_FILE)
+    if (CHANNEL && parseInt(readFileSync(PID_FILE, 'utf8'), 10) === process.pid) rmSync(PID_FILE)
   } catch {}
   // bot.stop() may wait out the current long-poll. Force-exit after 2s.
   setTimeout(() => process.exit(0), 2000)
@@ -214,7 +225,7 @@ bot.catch(err => log(`handler error (polling continues): ${err.error}`))
 // Retry polling forever with backoff. A persistent 409 means another poller
 // holds the token; we keep retrying slowly instead of going deaf for good,
 // so closing the other session lets this one take over.
-void (async () => {
+if (CHANNEL) void (async () => {
   for (let attempt = 1; ; attempt++) {
     try {
       await bot.start({
