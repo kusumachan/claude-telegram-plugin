@@ -29,10 +29,20 @@ Based on the official [`telegram` plugin](https://github.com/anthropics/claude-p
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Send to a chat. `chat_id` + `text`, optional `thread_id` (forum topic), `reply_to`, `files` (photos/video/audio/documents, 50MB each), `format` (`text` / `html` / `markdownv2`). Auto-chunks; falls back to plain text if Telegram rejects the markup. |
+| `reply` | Send to a chat. `chat_id` + `text`, optional `thread_id` (forum topic), `reply_to`, `files` (photos/video/audio/documents, 50MB each), `format` (`text` / `html` / `markdownv2`), `buttons` (choice buttons). Auto-chunks; falls back to plain text if Telegram rejects the markup. |
 | `react` | Emoji reaction from Telegram's fixed whitelist. |
-| `edit_message` | Edit a message the bot sent (progress updates). |
+| `edit_message` | Edit a message the bot sent (progress updates). Optional `buttons` replaces the keyboard; `[]` removes it. |
 | `download_attachment` | Fetch an inbound attachment by `attachment_file_id` into the inbox (≤20MB). |
+
+## Choice buttons
+
+Claude can attach inline buttons to a reply instead of asking the user to type:
+
+```json
+{ "chat_id": "412587349", "text": "Deploy to production?", "buttons": [["Yes", "No"], [{ "text": "Changelog", "url": "https://example.com" }]] }
+```
+
+Tapping a label button sends it back to Claude as a new message (content = label, meta `button_choice`). The keyboard is then removed and the choice is appended under the question, so each prompt is single-use. Only people who could message the bot can tap: allowlisted users in DMs, and members of enabled groups (respecting the group's `allowFrom`). Labels are read back from the message itself, so buttons keep working across server restarts.
 
 ## Inbound context
 
@@ -62,6 +72,7 @@ src/tools.ts         MCP tool definitions + handlers
 src/permissions.ts   permission-prompt relay
 src/typing.ts        typing indicator keep-alive
 src/text.ts          chunking, formatting fallback, sanitizers
+src/buttons.ts       choice-button keyboards + tap resolution
 src/files.ts         downloads, sendable check, inbox cleanup
 src/cli.ts           access CLI used by the /access skill
 ```
@@ -85,6 +96,7 @@ src/cli.ts           access CLI used by the /access skill
 **Features**
 - Forum topics (`thread_id` in and out)
 - Reply/quote context, forwarded-from, edited messages, albums, locations, contacts
+- Choice buttons for Claude (`buttons` on `reply` / `edit_message`)
 - `html` format
 - Video and audio file sending
 - Persistent typing indicator

@@ -3,6 +3,7 @@ import { extname } from 'path'
 import { GrammyError, InputFile, type Api } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { type AccessStore, assertAllowedChat } from './access.ts'
+import { BUTTONS_SCHEMA, buildKeyboard } from './buttons.ts'
 import { MAX_CHUNK_LIMIT, MAX_UPLOAD_BYTES } from './config.ts'
 import { assertSendable, downloadToInbox } from './files.ts'
 import { chunk, isParseError, parseModeFor, toPlain } from './text.ts'
@@ -21,7 +22,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'reply',
     description:
-      'Reply on Telegram. Pass chat_id from the inbound message (and thread_id if present). Optionally pass reply_to (message_id) to quote a specific earlier message, and files (absolute paths) to attach.',
+      'Reply on Telegram. Pass chat_id from the inbound message (and thread_id if present). Optionally pass reply_to (message_id) to quote a specific earlier message, files (absolute paths) to attach, and buttons for quick choices.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -42,6 +43,7 @@ export const TOOL_DEFINITIONS = [
             'Absolute file paths to attach. Images send as photos, .mp4 as video, .mp3/.m4a as audio, everything else as documents. Max 50MB each.',
         },
         format: FORMAT_SCHEMA,
+        buttons: BUTTONS_SCHEMA,
       },
       required: ['chat_id', 'text'],
     },
@@ -83,6 +85,10 @@ export const TOOL_DEFINITIONS = [
         message_id: { type: 'string' },
         text: { type: 'string' },
         format: FORMAT_SCHEMA,
+        buttons: {
+          ...BUTTONS_SCHEMA,
+          description: 'Replace the inline buttons. Omit to keep the current ones; pass [] to remove them.',
+        },
       },
       required: ['chat_id', 'message_id', 'text'],
     },
@@ -158,10 +164,12 @@ async function reply(deps: ToolDeps, args: Record<string, unknown>): Promise<Too
   const files = (args.files as string[] | undefined) ?? []
   const format = args.format as string | undefined
   const parseMode = parseModeFor(format)
+  const keyboard = buildKeyboard(args.buttons)
 
   const access = store.load()
   assertAllowedChat(access, chatId)
   if (!text && files.length === 0) throw new Error('nothing to send: text is empty and no files given')
+  if (keyboard && !text) throw new Error('buttons need text to attach to')
 
   for (const f of files) {
     assertSendable(f, deps.stateDir)
@@ -186,7 +194,12 @@ async function reply(deps: ToolDeps, args: Record<string, unknown>): Promise<Too
 
   try {
     for (let i = 0; i < chunks.length; i++) {
-      const base = { ...threadOpt, ...replyOpt(i) }
+      // Buttons go on the last chunk so they sit right under the question.
+      const base = {
+        ...threadOpt,
+        ...replyOpt(i),
+        ...(keyboard && i === chunks.length - 1 ? { reply_markup: keyboard } : {}),
+      }
       try {
         const sent = await api.sendMessage(chatId, chunks[i]!, { ...base, ...(parseMode ? { parse_mode: parseMode } : {}) })
         sentIds.push(sent.message_id)
@@ -235,15 +248,19 @@ async function editMessage(deps: ToolDeps, args: Record<string, unknown>): Promi
   if (text.length > MAX_CHUNK_LIMIT) {
     throw new Error(`text is ${text.length} chars; Telegram caps a message at ${MAX_CHUNK_LIMIT}. Send the rest with reply.`)
   }
+  // Omitted → keep the existing keyboard. [] → remove it.
+  const markup = args.buttons === undefined
+    ? {}
+    : { reply_markup: buildKeyboard(args.buttons) ?? { inline_keyboard: [] } }
 
   try {
-    await deps.api.editMessageText(chatId, messageId, text, parseMode ? { parse_mode: parseMode } : undefined)
+    await deps.api.editMessageText(chatId, messageId, text, { ...markup, ...(parseMode ? { parse_mode: parseMode } : {}) })
   } catch (err) {
     if (err instanceof GrammyError && /message is not modified/i.test(err.description)) {
       return ok(`unchanged (id: ${messageId})`)
     }
     if (!parseMode || !isParseError(err)) throw err
-    await deps.api.editMessageText(chatId, messageId, toPlain(text, format))
+    await deps.api.editMessageText(chatId, messageId, toPlain(text, format), markup)
     return ok(`edited as plain text (id: ${messageId}) — Telegram rejected the ${format} markup`)
   }
   return ok(`edited (id: ${messageId})`)

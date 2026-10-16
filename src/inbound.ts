@@ -1,8 +1,9 @@
-import type { Bot, Context } from 'grammy'
+import type { Bot, Context, Filter } from 'grammy'
 import type { Message, ReactionTypeEmoji } from 'grammy/types'
 import type { AccessStore } from './access.ts'
 import { downloadToInbox } from './files.ts'
-import { dmCommandAllowed, gate, isMentioned } from './gate.ts'
+import { BUTTON_CALLBACK_RE, labelFor } from './buttons.ts'
+import { callbackAllowed, dmCommandAllowed, gate, isMentioned } from './gate.ts'
 import { PERMISSION_CALLBACK_RE, PERMISSION_REPLY_RE, type PermissionRelay } from './permissions.ts'
 import { safeName, safeSnippet } from './text.ts'
 import type { TypingTracker } from './typing.ts'
@@ -41,7 +42,7 @@ export function registerInbound(deps: InboundDeps): void {
   const { bot } = deps
 
   registerCommands(deps)
-  registerPermissionButtons(deps)
+  registerCallbacks(deps)
 
   bot.on('message:text', ctx => handleInbound(deps, ctx, ctx.message.text))
   bot.on('edited_message:text', ctx => handleInbound(deps, ctx, ctx.editedMessage.text, { edited: true }))
@@ -303,35 +304,97 @@ function registerCommands(deps: InboundDeps): void {
   })
 }
 
-// Callback data is `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
-function registerPermissionButtons(deps: InboundDeps): void {
+// One handler for all inline-button taps:
+//   perm:allow|deny|more:<id>  — permission prompts
+//   btn:<row>:<col>            — Claude's choice buttons (see buttons.ts)
+function registerCallbacks(deps: InboundDeps): void {
   deps.bot.on('callback_query:data', async ctx => {
-    const m = PERMISSION_CALLBACK_RE.exec(ctx.callbackQuery.data)
-    if (!m) {
-      await ctx.answerCallbackQuery().catch(() => {})
-      return
-    }
-    if (!deps.store.load().allowFrom.includes(String(ctx.from.id))) {
-      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
-      return
-    }
-    const [, behavior, requestId] = m as unknown as [string, 'allow' | 'deny' | 'more', string]
-
-    if (behavior === 'more') {
-      const details = deps.relay.details(requestId)
-      if (!details) {
-        await ctx.answerCallbackQuery({ text: 'Details no longer available.' }).catch(() => {})
-        return
-      }
-      const keyboard = new InlineKeyboard()
-        .text('✅ Allow', `perm:allow:${requestId}`)
-        .text('❌ Deny', `perm:deny:${requestId}`)
-      await ctx.editMessageText(details, { reply_markup: keyboard }).catch(() => {})
-      await ctx.answerCallbackQuery().catch(() => {})
-      return
-    }
-
-    await deps.relay.resolve(requestId, behavior, displayName(ctx.from))
-    await ctx.answerCallbackQuery({ text: behavior === 'allow' ? '✅ Allowed' : '❌ Denied' }).catch(() => {})
+    const data = ctx.callbackQuery.data
+    const perm = PERMISSION_CALLBACK_RE.exec(data)
+    if (perm) return handlePermissionTap(deps, ctx, perm[1] as 'allow' | 'deny' | 'more', perm[2]!)
+    if (BUTTON_CALLBACK_RE.test(data)) return handleChoiceTap(deps, ctx, data)
+    await ctx.answerCallbackQuery().catch(() => {})
   })
 }
+
+async function handlePermissionTap(
+  deps: InboundDeps,
+  ctx: CallbackContext,
+  behavior: 'allow' | 'deny' | 'more',
+  requestId: string,
+): Promise<void> {
+  if (!deps.store.load().allowFrom.includes(String(ctx.from.id))) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+
+  if (behavior === 'more') {
+    const details = deps.relay.details(requestId)
+    if (!details) {
+      await ctx.answerCallbackQuery({ text: 'Details no longer available.' }).catch(() => {})
+      return
+    }
+    const keyboard = new InlineKeyboard()
+      .text('✅ Allow', `perm:allow:${requestId}`)
+      .text('❌ Deny', `perm:deny:${requestId}`)
+    await ctx.editMessageText(details, { reply_markup: keyboard }).catch(() => {})
+    await ctx.answerCallbackQuery().catch(() => {})
+    return
+  }
+
+  await deps.relay.resolve(requestId, behavior, displayName(ctx.from))
+  await ctx.answerCallbackQuery({ text: behavior === 'allow' ? '✅ Allowed' : '❌ Denied' }).catch(() => {})
+}
+
+async function handleChoiceTap(deps: InboundDeps, ctx: CallbackContext, data: string): Promise<void> {
+  const msg = ctx.callbackQuery.message
+  const chat = msg?.chat
+  // An "inaccessible" message (too old) has date 0 and no markup.
+  const label = msg && msg.date !== 0 ? labelFor(msg.reply_markup, data) : undefined
+  if (!msg || !chat || !label) {
+    await ctx.answerCallbackQuery({ text: 'This button is no longer active.' }).catch(() => {})
+    return
+  }
+  const chatId = String(chat.id)
+  const senderId = String(ctx.from.id)
+  if (!callbackAllowed(deps.store.load(), chat.type, chatId, senderId)) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+
+  await ctx.answerCallbackQuery({ text: label }).catch(() => {})
+
+  // Single use: drop the keyboard and record the choice under the question,
+  // keeping the original formatting via its entities.
+  const note = `\n\n→ ${label}${chat.type === 'private' ? '' : ` (${displayName(ctx.from)})`}`
+  const edit = 'text' in msg && msg.text
+    ? ctx.editMessageText(msg.text + note, { entities: msg.entities, reply_markup: { inline_keyboard: [] } })
+    : ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } })
+  await edit.catch(err => deps.log(`failed to close choice buttons: ${err}`))
+
+  const threadId = msg.is_topic_message ? msg.message_thread_id : undefined
+  deps.typing.start(chatId, threadId)
+
+  // The label comes from our own keyboard (Claude wrote it), but sanitize it
+  // for meta like any other string.
+  const meta: Record<string, string | undefined> = {
+    chat_id: chatId,
+    message_id: String(msg.message_id),
+    thread_id: threadId != null ? String(threadId) : undefined,
+    user: ctx.from.username ?? senderId,
+    user_id: senderId,
+    user_name: safeSnippet([ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '), 64),
+    chat_type: chat.type,
+    ts: new Date().toISOString(),
+    button_choice: safeSnippet(label, 64),
+    button_message_id: String(msg.message_id),
+  }
+  try {
+    await deps.deliver({ content: label, meta: compact(meta) })
+  } catch (err) {
+    deps.typing.stop(chatId, threadId)
+    deps.log(`failed to deliver button tap to Claude: ${err}`)
+  }
+}
+
+type CallbackContext = Filter<Context, 'callback_query:data'>

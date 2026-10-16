@@ -80,6 +80,23 @@ export function dmCommandAllowed(access: Access, chatType: string | undefined, s
   return true
 }
 
+/**
+ * Who may tap Claude's choice buttons: the same people whose messages the
+ * gate would deliver, minus pairing (a stranger tapping never pairs) and
+ * minus requireMention (a tap is addressed to the bot by definition).
+ */
+export function callbackAllowed(access: Access, chatType: string | undefined, chatId: string, senderId: string): boolean {
+  if (access.dmPolicy === 'disabled') return false
+  if (chatType === 'private') return access.allowFrom.includes(senderId)
+  if (chatType === 'group' || chatType === 'supergroup') {
+    const policy = access.groups[chatId]
+    if (!policy) return false
+    const allow = policy.allowFrom ?? []
+    return allow.length === 0 || allow.includes(senderId)
+  }
+  return false
+}
+
 export type MentionInput = {
   text: string
   entities: MessageEntity[]

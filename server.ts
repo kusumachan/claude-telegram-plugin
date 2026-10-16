@@ -96,6 +96,8 @@ const mcp = new Server(
       '',
       'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. Pass chat_id back to reply, and thread_id too when present (forum topics). If the tag has image_path, Read that file — it is an image the sender attached. If it has attachment_file_id, call download_attachment with that file_id, then Read the returned path. reply_to_text is the message the sender quoted. edited="true" means the sender edited an earlier message. Use reply_to (a message_id) only when replying to an earlier message; omit it for normal responses.',
       '',
+      'When you need the user to choose between a few options, pass buttons to reply (e.g. buttons: [["Yes", "No"]]) instead of asking them to type. A tap arrives as a new message whose content is the label, with button_choice meta; the buttons are removed after one tap.',
+      '',
       "reply accepts file paths (files: [\"/abs/path.png\"]) for attachments. Prefer format: 'html' when you need formatting. Use react for emoji reactions, and edit_message for interim progress updates. Edits don't trigger push notifications — when a long task completes, send a new reply so the user's device pings.",
       '',
       "Telegram's Bot API exposes no history or search — you only see messages as they arrive. If you need earlier context, ask the user to paste it or summarize.",
