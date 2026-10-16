@@ -5,7 +5,7 @@
     "": {
       "name": "claude-channel-telegram-plus",
       "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.27.1",
+        "@modelcontextprotocol/sdk": "1.32.1",
         "grammy": "^1.21.0",
         "zod": "^4.0.0",
       },

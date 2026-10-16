@@ -6,6 +6,7 @@ Based on the official [`telegram` plugin](https://github.com/anthropics/claude-p
 
 ## Prerequisites
 
+- Claude Code signed in with a claude.ai account or a Console API key (channels aren't available on Bedrock, Vertex, or Foundry). Team/Enterprise orgs must enable channels first.
 - [Bun](https://bun.sh) — `curl -fsSL https://bun.sh/install | bash` or `brew install oven-sh/bun/bun`.
 
 ## Quick setup
@@ -18,7 +19,11 @@ Based on the official [`telegram` plugin](https://github.com/anthropics/claude-p
    ```
 3. **Save the token:** `/telegram-plus:configure 123456789:AAH...`
    This writes `~/.claude/channels/telegram-plus/.env`. A shell `TELEGRAM_BOT_TOKEN` takes precedence.
-4. **Relaunch with the channel flag:** `claude --channels plugin:telegram-plus@telegram-plus-dev`
+4. **Relaunch with the development channel flag:**
+   ```sh
+   claude --dangerously-load-development-channels plugin:telegram-plus@telegram-plus-dev
+   ```
+   Channels are a research preview, and `--channels` only accepts plugins on Anthropic's allowlist, so this custom plugin must be loaded with the development flag. Claude Code shows a confirmation dialog on every start; choose **I am using this for local development**. The flag works in interactive sessions only. With `-p` or the Agent SDK it is ignored and the channel doesn't register.
 5. **Pair** — DM your bot, it replies with a 6-char code; run `/telegram-plus:access pair <code>`.
 6. **Lock it down:** `/telegram-plus:access policy allowlist`.
 
@@ -61,6 +66,8 @@ bun install
 bun test          # unit tests
 bun run typecheck # tsc --noEmit
 ```
+
+`@modelcontextprotocol/sdk` is pinned to an exact version on purpose: Claude Code doesn't register a channel server that negotiates MCP protocol revision `2026-07-28`. The pinned SDK negotiates `2025-11-25`. Check the protocol version before bumping it.
 
 ```
 server.ts            entry: MCP server, lifecycle, polling loop
