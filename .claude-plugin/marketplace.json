@@ -1,0 +1,13 @@
+{
+  "name": "telegram-plus-dev",
+  "owner": {
+    "name": "Bintang"
+  },
+  "plugins": [
+    {
+      "name": "telegram-plus",
+      "source": "./",
+      "description": "Telegram channel for Claude Code with access control, forum topics, reply context and safer permission relay."
+    }
+  ]
+}
