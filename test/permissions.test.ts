@@ -35,6 +35,14 @@ describe('PermissionRelay', () => {
     expect(relay.size).toBe(0)
   })
 
+  test('has() only knows ids we sent, so "yes sweet" stays ordinary chat', async () => {
+    const { api } = fakeApi()
+    const relay = new PermissionRelay(api, async () => {})
+    await relay.request(req, ['1'])
+    expect(relay.has('abcde')).toBe(true)
+    expect(relay.has('sweet')).toBe(false)
+  })
+
   test('details pretty-prints the input', async () => {
     const { api } = fakeApi()
     const relay = new PermissionRelay(api, async () => {})

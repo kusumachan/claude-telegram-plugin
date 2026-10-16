@@ -45,6 +45,10 @@ export class PermissionRelay {
     return this.pending.size
   }
 
+  has(request_id: string): boolean {
+    return this.pending.has(request_id)
+  }
+
   async request(req: PermissionRequest, recipients: string[], now = Date.now()): Promise<void> {
     const entry: Entry = { ...req, createdAt: now, messages: [] }
     this.pending.set(req.request_id, entry)

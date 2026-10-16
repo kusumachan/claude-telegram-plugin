@@ -38,19 +38,22 @@ import { TypingTracker } from './src/typing.ts'
 const log = (msg: string) => process.stderr.write(`telegram channel: ${msg}\n`)
 
 loadEnvFile()
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const STATIC = process.env.TELEGRAM_ACCESS_MODE === 'static'
-
-if (!TOKEN) {
-  log(`TELEGRAM_BOT_TOKEN required\n  set in ${ENV_FILE}\n  format: TELEGRAM_BOT_TOKEN=123456789:AAH...`)
-  process.exit(1)
-}
 
 // Claude Code starts this server in every session where the plugin is
 // enabled, and can't tell us whether the session registered it as a channel.
 // Only the session started via bin/claude-telegram polls; everywhere else we
 // stay tools-only so sessions don't fight over the bot token.
 const CHANNEL = isChannelSession()
+
+const TOKEN_HELP = `TELEGRAM_BOT_TOKEN required — set it in ${ENV_FILE} (format: TELEGRAM_BOT_TOKEN=123456789:AAH...) or run /telegram-plus:configure <token>`
+if (!process.env.TELEGRAM_BOT_TOKEN && CHANNEL) {
+  log(TOKEN_HELP)
+  process.exit(1)
+}
+// A tools-only session without a token stays up (so /mcp doesn't show a
+// failed server in every session) and its tools explain what's missing.
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
 if (CHANNEL) {
   // Telegram allows exactly one getUpdates consumer per token. If a previous
@@ -83,7 +86,7 @@ process.on('unhandledRejection', err => log(`unhandled rejection: ${err}`))
 process.on('uncaughtException', err => log(`uncaught exception: ${err}`))
 
 const store = new AccessStore(STATE_DIR, STATIC, log)
-const bot = new Bot(TOKEN)
+const bot = new Bot(TOKEN || '0:unconfigured')
 let botUsername = ''
 const typing = new TypingTracker((chatId, threadId) =>
   bot.api.sendChatAction(chatId, 'typing', threadId != null ? { message_thread_id: threadId } : undefined),
@@ -144,7 +147,9 @@ const toolDeps: ToolDeps = { api: bot.api, store, stateDir: STATE_DIR, inboxDir:
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_DEFINITIONS }))
 mcp.setRequestHandler(CallToolRequestSchema, async req =>
-  callTool(toolDeps, req.params.name, (req.params.arguments ?? {}) as Record<string, unknown>),
+  TOKEN
+    ? callTool(toolDeps, req.params.name, (req.params.arguments ?? {}) as Record<string, unknown>)
+    : { content: [{ type: 'text' as const, text: `${req.params.name} failed: ${TOKEN_HELP}` }], isError: true },
 )
 
 await mcp.connect(new StdioServerTransport())

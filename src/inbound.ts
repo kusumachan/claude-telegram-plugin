@@ -159,10 +159,12 @@ async function handleInbound(deps: InboundDeps, ctx: Context, text: string, opts
   // Permission-reply intercept. Only DM-allowlisted users may answer — a
   // member of an allowlisted group passed the gate but was never paired, and
   // never received the prompt.
+  // Only for ids we actually sent: "yes sweet" or "no worry" match the
+  // pattern too, and must still reach Claude as ordinary chat.
   const permMatch = !opts.edited && ctx.chat.type === 'private' && access.allowFrom.includes(senderId)
     ? PERMISSION_REPLY_RE.exec(text)
     : null
-  if (permMatch) {
+  if (permMatch && deps.relay.has(permMatch[2]!.toLowerCase())) {
     const allow = permMatch[1]!.toLowerCase().startsWith('y')
     await deps.relay.resolve(permMatch[2]!.toLowerCase(), allow ? 'allow' : 'deny', displayName(from))
     void ctx.api.setMessageReaction(chatId, msg.message_id, [
@@ -346,6 +348,9 @@ async function handlePermissionTap(
   await ctx.answerCallbackQuery({ text: behavior === 'allow' ? '✅ Allowed' : '❌ Denied' }).catch(() => {})
 }
 
+/** Choice prompts already answered, as `chatId:messageId`. Bounded FIFO. */
+const answeredChoices = new Set<string>()
+
 async function handleChoiceTap(deps: InboundDeps, ctx: CallbackContext, data: string): Promise<void> {
   const msg = ctx.callbackQuery.message
   const chat = msg?.chat
@@ -362,14 +367,27 @@ async function handleChoiceTap(deps: InboundDeps, ctx: CallbackContext, data: st
     return
   }
 
+  // Single use. Claim the message before any await so a quick double tap
+  // (or two group members at once) can't deliver the choice twice.
+  const tapKey = `${chatId}:${msg.message_id}`
+  if (answeredChoices.has(tapKey)) {
+    await ctx.answerCallbackQuery({ text: 'Already answered.' }).catch(() => {})
+    return
+  }
+  answeredChoices.add(tapKey)
+  if (answeredChoices.size > 1000) answeredChoices.delete(answeredChoices.values().next().value!)
+
   await ctx.answerCallbackQuery({ text: label }).catch(() => {})
 
-  // Single use: drop the keyboard and record the choice under the question,
-  // keeping the original formatting via its entities.
+  // Drop the keyboard and record the choice under the question, keeping the
+  // original formatting via its entities. If the text edit fails (e.g. the
+  // note pushes it past 4096 chars), at least remove the buttons.
   const note = `\n\n→ ${label}${chat.type === 'private' ? '' : ` (${displayName(ctx.from)})`}`
+  const clearButtons = () => ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } })
   const edit = 'text' in msg && msg.text
     ? ctx.editMessageText(msg.text + note, { entities: msg.entities, reply_markup: { inline_keyboard: [] } })
-    : ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } })
+        .catch(() => clearButtons())
+    : clearButtons()
   await edit.catch(err => deps.log(`failed to close choice buttons: ${err}`))
 
   const threadId = msg.is_topic_message ? msg.message_thread_id : undefined
