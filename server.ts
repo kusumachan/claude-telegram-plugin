@@ -30,6 +30,7 @@ import {
   parseAskButtons,
 } from './src/ask.ts'
 import { isChannelSession } from './src/channel-mode.ts'
+import { type InboxConnectBody, inboxEnabled } from './src/inbox.ts'
 import { ENV_FILE, INBOX_DIR, loadEnvFile, STATE_DIR } from './src/config.ts'
 import { type HubEvent, HubClient } from './src/hub/client.ts'
 import { callTool, TOOL_DEFINITIONS, type ToolDeps, type ToolResult } from './src/tools.ts'
@@ -40,6 +41,8 @@ const log = (msg: string) => process.stderr.write(`telegram channel: ${msg}\n`)
 
 loadEnvFile()
 const CHANNEL = isChannelSession()
+// Owner messages reach a non-channel session through hooks (src/inbox.ts).
+const INBOX = !CHANNEL && inboxEnabled()
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
 const TOKEN_HELP = `TELEGRAM_BOT_TOKEN required — set it in ${ENV_FILE} (format: TELEGRAM_BOT_TOKEN=123456789:AAH...) or run /telegram-plus:configure <token>`
 // Without a token a tools-only server stays up (so /mcp doesn't show a failed
@@ -57,7 +60,7 @@ const CWD = process.env.CLAUDE_PROJECT_DIR ?? process.cwd()
 const SESSION_NAME = process.env.TELEGRAM_PLUS_NAME ?? basename(CWD)
 
 const mcp = new Server(
-  { name: 'telegram-plus', version: '0.4.0' },
+  { name: 'telegram-plus', version: '0.5.0' },
   {
     capabilities: {
       tools: {},
@@ -100,8 +103,9 @@ async function hubReady(): Promise<void> {
   await Promise.race([connected, Bun.sleep(15_000)])
 }
 
-// Tools-only sessions talk to the Bot API directly; no hub needed.
-const localDeps: ToolDeps | null = CHANNEL ? null : (() => {
+// Tools-only sessions talk to the Bot API directly; no hub needed. Inbox
+// sessions go through the hub so replies to what they send come back to them.
+const localDeps: ToolDeps | null = CHANNEL || INBOX ? null : (() => {
   const bot = new Bot(TOKEN || '0:unconfigured')
   return {
     api: bot.api,
@@ -268,11 +272,14 @@ function onHubEvent(e: HubEvent): void {
 let shuttingDown = false
 
 async function stayConnected(): Promise<void> {
+  const [path, body] = INBOX
+    ? ['/inbox/connect', { id: SESSION_ID, name: SESSION_NAME, topic: sessionTopic(CWD), cwd: CWD } satisfies InboxConnectBody]
+    : ['/session/connect', { id: SESSION_ID, name: SESSION_NAME, cwd: CWD }]
   for (let attempt = 0; !shuttingDown; attempt++) {
     try {
       await hub.ensure()
       attempt = 0
-      await hub.stream('/session/connect', { id: SESSION_ID, name: SESSION_NAME, cwd: CWD }, onHubEvent)
+      await hub.stream(path, body, onHubEvent)
       if (!shuttingDown) log('hub stream ended — reconnecting')
     } catch (err) {
       if (!shuttingDown) log(`hub connection failed: ${err instanceof Error ? err.message : err}`)
@@ -283,8 +290,9 @@ async function stayConnected(): Promise<void> {
   }
 }
 
-if (CHANNEL) void stayConnected()
-else log('tools-only mode (not launched via bin/claude-telegram) — not receiving Telegram messages')
+if (CHANNEL || INBOX) void stayConnected()
+if (INBOX) log('inbox mode: owner messages in this project\'s topic are delivered by hooks')
+else if (!CHANNEL) log('tools-only mode (not launched via bin/claude-telegram) — not receiving Telegram messages')
 
 // When Claude Code closes the MCP connection, stdin gets EOF. Exiting closes
 // our hub stream, which unregisters this session.

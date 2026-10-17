@@ -1,7 +1,7 @@
 {
   "name": "telegram-plus",
   "description": "Telegram channel for Claude Code — messaging bridge with built-in access control, forum topics, reply context and safer permission relay. Manage pairing, allowlists, and policy via /telegram-plus:access.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": {
     "name": "Bintang"
   },

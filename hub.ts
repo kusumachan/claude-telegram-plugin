@@ -31,6 +31,7 @@ import {
   questionText,
 } from './src/ask.ts'
 import { buildKeyboard } from './src/buttons.ts'
+import { type InboxConnectBody, type InboxMessage, type InboxTakeBody, type InboxTakeResult } from './src/inbox.ts'
 import { APPROVED_DIR, INBOX_DIR, INBOX_MAX_AGE_MS, loadEnvFile, STATE_DIR } from './src/config.ts'
 import { cleanInbox } from './src/files.ts'
 import { callbackAllowed, dmCommandAllowed } from './src/gate.ts'
@@ -254,6 +255,7 @@ async function postQuestion(body: AskBody, access: Access): Promise<AskResult> {
   }
   if (messages.length === 0) return { error: 'could not post the question to Telegram (see hub.log)' }
   const q = questions.add({ session: body.session, asker: body.asker, question, askedAt: Date.now(), messages })
+  recordInboxOwner(messages, body.session) // later replies to it reach the asker's inbox
   log(`question ${q.id} from ${body.asker} posted`)
   return { id: q.id }
 }
@@ -284,6 +286,7 @@ async function answerQuestion(n: ChannelNotification): Promise<boolean> {
   let q: Question | undefined
   if (refQuestion) {
     q = refQuestion
+    if (q.answer && inboxSessions.has(q.session)) return false // a follow-up: goes to the asker's inbox
     if (q.answer) {
       await bot.api.sendMessage(chatId, 'That question was already answered.', { message_thread_id: thread }).catch(() => {})
       return true
@@ -316,6 +319,102 @@ async function answerQuestion(n: ChannelNotification): Promise<boolean> {
   return true
 }
 
+// --- owner-message inbox ---------------------------------------------------------
+
+type InboxSession = InboxConnectBody & { queue: InboxMessage[] }
+/** Sessions that opted in with TELEGRAM_PLUS_INBOX, by session id, while connected. */
+const inboxSessions = new Map<string, InboxSession>()
+/** `${chatId}:${messageId}` → inbox session id that sent it. Bounded, insertion-ordered. */
+const inboxOwners = new Map<string, string>()
+const MAX_INBOX_OWNED = 5000
+const MAX_INBOX_QUEUE = 50
+
+function recordInboxOwner(messages: { chatId: string; messageId: number }[], sessionId: string): void {
+  for (const m of messages) {
+    inboxOwners.set(`${m.chatId}:${m.messageId}`, sessionId)
+    if (inboxOwners.size > MAX_INBOX_OWNED) inboxOwners.delete(inboxOwners.keys().next().value!)
+  }
+}
+
+const react = (chatId: string, messageId: number, emoji: '👀' | '👍') =>
+  bot.api.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji }]).catch(() => {})
+
+/**
+ * Queue an owner message for an inbox session: a reply to (or tap on) one of
+ * its messages, or any message in the topic of exactly one inbox session.
+ * Runs after ask_owner's answer matching, so a plain message still answers
+ * the single open question there. Returns true when consumed.
+ */
+async function queueForInbox(n: ChannelNotification): Promise<boolean> {
+  if (inboxSessions.size === 0) return false
+  const meta = n.meta
+  if (meta.edited || !meta.user_id || !store.load().allowFrom.includes(meta.user_id)) return false
+  const chatId = meta.chat_id!
+  const thread = meta.thread_id != null ? Number(meta.thread_id) : undefined
+  const ref = meta.button_message_id ?? meta.reply_to_message_id
+
+  let target: InboxSession | undefined
+  const owner = ref != null ? inboxOwners.get(`${chatId}:${ref}`) : undefined
+  if (owner && inboxSessions.has(owner)) {
+    target = inboxSessions.get(owner)
+  } else {
+    if (ref != null && router.ownerOf(chatId, Number(ref))) return false // meant for a channel session
+    const group = topicsGroupId()
+    const topic = group && chatId === group && thread != null ? topics.nameFor(group, thread) : undefined
+    if (!topic) return false
+    const here = [...inboxSessions.values()].filter(s => s.topic === topic)
+    if (here.length === 0) return false
+    if (here.length > 1) {
+      await bot.api.sendMessage(chatId,
+        `${here.length} agents are running here (${here.map(s => s.name).join(', ')}). Reply to a message from the one you mean.`,
+        { message_thread_id: thread }).catch(() => {})
+      return true
+    }
+    target = here[0]!
+  }
+  if (!target) return false
+
+  if (meta.attachment_kind || meta.image_path) {
+    await bot.api.sendMessage(chatId, `Attachments aren't supported for agents. Send ${target.name} text instead.`,
+      { message_thread_id: thread }).catch(() => {})
+    return true
+  }
+  if (target.queue.length >= MAX_INBOX_QUEUE) {
+    await bot.api.sendMessage(chatId, `${target.name} already has ${MAX_INBOX_QUEUE} unread messages. Wait for it to catch up.`,
+      { message_thread_id: thread }).catch(() => {})
+    return true
+  }
+  const by = meta.user ? (/^\d+$/.test(meta.user) ? meta.user_name || meta.user : `@${meta.user}`) : 'owner'
+  target.queue.push({ chatId, messageId: Number(meta.message_id), threadId: thread, text: n.content, by, at: Date.now() })
+  if (!meta.button_choice) void react(chatId, Number(meta.message_id), '👀') // queued
+  log(`queued a message for ${target.name} (${target.queue.length} waiting)`)
+  return true
+}
+
+/** Hand everything queued to the session's hook, oldest first, and mark it delivered. */
+function takeInbox(sessionId: string): InboxMessage[] {
+  const s = inboxSessions.get(sessionId)
+  if (!s || s.queue.length === 0) return []
+  const messages = s.queue.splice(0)
+  for (const m of messages) if (m.messageId) void react(m.chatId, m.messageId, '👍') // delivered
+  log(`delivered ${messages.length} message(s) to ${s.name}`)
+  return messages
+}
+
+/** The session ended: tell the owner what it never read. */
+async function closeInbox(s: InboxSession): Promise<void> {
+  if (s.queue.length === 0) return
+  const byChat = new Map<string, InboxMessage[]>()
+  for (const m of s.queue) byChat.set(`${m.chatId}:${m.threadId ?? ''}`, [...(byChat.get(`${m.chatId}:${m.threadId ?? ''}`) ?? []), m])
+  for (const ms of byChat.values()) {
+    const first = ms[0]!
+    await bot.api.sendMessage(first.chatId,
+      `⚠️ ${s.name} ended before reading ${ms.length === 1 ? 'your message' : `${ms.length} of your messages`}. ${ms.length === 1 ? 'It was' : 'They were'} not delivered.`,
+      { message_thread_id: first.threadId, reply_parameters: { message_id: first.messageId, allow_sending_without_reply: true } },
+    ).catch(err => log(`undelivered notice failed: ${err}`))
+  }
+}
+
 // --- routing inbound messages ---------------------------------------------
 
 const held = new Map<string, ChannelNotification[]>()
@@ -334,6 +433,7 @@ function sessionKeyboard(chatId: string, prefix = 'use'): InlineKeyboard {
 async function deliver(n: ChannelNotification): Promise<boolean> {
   touch()
   if (await answerQuestion(n)) return false // consumed; stops the typing indicator
+  if (await queueForInbox(n)) return false
   const chatId = n.meta.chat_id!
   const replyTo = n.meta.reply_to_message_id ?? n.meta.button_message_id
   const group = topicsGroupId()
@@ -474,7 +574,12 @@ async function handle(req: Request): Promise<Response> {
     return json({ ok: true, pid: process.pid, sessions: router.size })
   }
   if (req.method === 'GET' && pathname === '/status') {
-    return json({ sessions: router.list(), pendingApprovals: hookRequests.size, openQuestions: questions.openCount })
+    return json({
+      sessions: router.list(),
+      inboxSessions: [...inboxSessions.values()].map(s => ({ name: s.name, topic: s.topic, cwd: s.cwd, queued: s.queue.length })),
+      pendingApprovals: hookRequests.size,
+      openQuestions: questions.openCount,
+    })
   }
   if (req.method !== 'POST') return json({ error: 'not found' }, 404)
 
@@ -513,6 +618,15 @@ async function handle(req: Request): Promise<Response> {
 
     case '/tool': {
       const { session, name, args } = body as ToolCallBody
+      const inbox = inboxSessions.get(session)
+      if (inbox) {
+        // Inbox sessions send through the hub so replies to their messages find them.
+        const result = await callTool(toolDeps, name, args ?? {})
+        if (result.sentIds?.length && typeof args?.chat_id === 'string') {
+          recordInboxOwner(result.sentIds.map(messageId => ({ chatId: args.chat_id as string, messageId })), session)
+        }
+        return json(result)
+      }
       const info = router.get(session)
       if (!info) return json({ content: [{ type: 'text', text: `${name} failed: session not connected to the hub` }], isError: true })
       const a = { ...(args ?? {}) }
@@ -582,6 +696,40 @@ async function handle(req: Request): Promise<Response> {
         void relay.cancel(id, '✔︎ Answered in the terminal')
       }
       return json({ ok: true })
+    }
+
+    case '/inbox/connect': {
+      const p = body as InboxConnectBody
+      if (!p.id || !p.topic) return json({ error: 'id and topic required' }, 400)
+      const s: InboxSession = { ...p, queue: inboxSessions.get(p.id)?.queue ?? [] }
+      let ping: ReturnType<typeof setInterval>
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          try { streams.get(`inbox:${p.id}`)?.close() } catch {}
+          streams.set(`inbox:${p.id}`, controller)
+          inboxSessions.set(p.id, s)
+          push(`inbox:${p.id}`, { type: 'hello', name: p.name })
+          ping = setInterval(() => {
+            if (!push(`inbox:${p.id}`, { type: 'ping' })) clearInterval(ping)
+          }, 20_000)
+          log(`inbox session connected: ${p.name} (topic ${p.topic})`)
+          void topicFor(p.topic) // so the owner has somewhere to write
+        },
+        cancel() {
+          clearInterval(ping)
+          if (inboxSessions.get(p.id) !== s) return // replaced by a reconnect
+          streams.delete(`inbox:${p.id}`)
+          inboxSessions.delete(p.id)
+          log(`inbox session disconnected: ${p.name}`)
+          void closeInbox(s)
+        },
+      })
+      return new Response(stream, { headers: { 'Content-Type': 'application/x-ndjson' } })
+    }
+
+    case '/inbox/take': {
+      const { session_id } = body as InboxTakeBody
+      return json({ messages: takeInbox(session_id).map(m => ({ text: m.text, by: m.by })) } satisfies InboxTakeResult)
     }
 
     case '/ask': {

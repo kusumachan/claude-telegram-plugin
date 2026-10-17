@@ -115,6 +115,28 @@ Any session with the plugin enabled, including one not started with the launcher
 /telegram-plus:access set askTimeoutMinutes 60
 ```
 
+## Messaging a running agent (inbox)
+
+A session that isn't a channel session can't receive Telegram messages. With `TELEGRAM_PLUS_INBOX=1` in its environment it gets an inbox instead. Owner messages are queued in the hub and handed to the model by the plugin's hooks:
+
+- **After the current tool call** (`PostToolUse`, as `additionalContext`), or
+- **when the turn ends** (`Stop`, which blocks the stop with the message as the reason, so the agent keeps going; the terminal shows this as "Stop hook error", which is cosmetic).
+
+Nothing can interrupt a running tool call. For a hard stop, kill the session.
+
+What reaches the inbox, from allowlisted users only:
+
+- A reply to (or tap on) one of the session's messages: its `ask_owner` questions and anything it sent with `reply`.
+- Any message in its project topic (`TELEGRAM_PLUS_TOPIC`, else the folder) when it's the only inbox session there. With several, a plain message gets a "reply to a message from the one you mean" hint.
+- A plain message still answers the single open `ask_owner` question in that topic first.
+- Text only. Attachments get "Attachments aren't supported for agents."
+
+The model sees `Message from the owner on Telegram (@you):\n<text>`, or for several at once `N messages from the owner on Telegram (@you), oldest first:\n[1] …\n[2] …`.
+
+Feedback in Telegram: 👀 when queued, 👍 when delivered to the agent. If the session ends with messages still queued, the bot replies to them saying they weren't delivered. The queue lives in the hub's memory, so a hub restart drops it.
+
+The hooks run after every tool call in every session, but without `TELEGRAM_PLUS_INBOX` they exit in the shell before starting anything. With it, they make one local socket call and never start the hub.
+
 ## Choice buttons
 
 Claude can attach inline buttons to a reply instead of asking the user to type:
