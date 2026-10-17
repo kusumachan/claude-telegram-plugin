@@ -1,7 +1,7 @@
 /** Shared plumbing for the hook entry points. */
 import type { Access } from '../src/access.ts'
 import { STATE_DIR } from '../src/config.ts'
-import { isMissingTopic, TopicStore, topicName, topicWelcome } from '../src/topics.ts'
+import { isMissingTopic, TopicStore, topicWelcome } from '../src/topics.ts'
 
 const SEND_TIMEOUT_MS = 10_000
 // Overridable for end-to-end tests against a local fake Bot API.
@@ -40,14 +40,14 @@ async function send(token: string, chatId: string, text: string, threadId?: numb
 }
 
 /**
- * Deliver a notice about the project `label`: into its forum topic when a
+ * Deliver a notice into the forum topic `topic` when a
  * topics group is configured (creating the topic if needed, recreating it if
  * it was deleted), otherwise — or if that fails — to every allowlisted DM.
  */
-export async function sendNotice(token: string, access: Access, label: string, text: string): Promise<void> {
+export async function sendNotice(token: string, access: Access, topic: string, text: string): Promise<void> {
   const group = access.topicsGroup && access.topicsGroup in access.groups ? access.topicsGroup : undefined
   if (group) {
-    const name = topicName(label)
+    const name = topic
     const topics = new TopicStore(STATE_DIR)
     for (let attempt = 0; attempt < 2; attempt++) {
       try {

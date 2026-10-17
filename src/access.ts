@@ -45,6 +45,8 @@ export type Access = {
   approvals?: 'on' | 'off'
   /** How long a Telegram approval prompt waits before leaving it to the terminal. Default: 300. */
   approvalTimeoutSeconds?: number
+  /** How long one ask_owner call waits before returning "no answer yet" (the question stays open). Default: 240. */
+  askTimeoutMinutes?: number
   /**
    * Forum supergroup (already in `groups`) where each session/project gets its
    * own topic. Notifications and approval prompts go there instead of DMs.

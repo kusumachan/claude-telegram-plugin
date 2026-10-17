@@ -3,7 +3,7 @@
  * getUpdates from a queue, and lets tests inject user messages and taps.
  */
 
-export type ApiCall = { method: string; params: Record<string, any> }
+export type ApiCall = { method: string; params: Record<string, any>; result?: any }
 
 export class FakeTelegram {
   calls: ApiCall[] = []
@@ -41,12 +41,15 @@ export class FakeTelegram {
           params = text ? JSON.parse(text) : {}
         } catch {}
         if (method === 'getUpdates') return Response.json({ ok: true, result: await this.takeUpdates() })
-        this.calls.push({ method, params })
-        for (const w of this.waiters.splice(0)) w()
         if (method === 'sendMessage' && this.deletedThreads.has(params.message_thread_id)) {
+          this.calls.push({ method, params })
+          for (const w of this.waiters.splice(0)) w()
           return Response.json({ ok: false, error_code: 400, description: 'Bad Request: message thread not found' })
         }
-        return Response.json({ ok: true, result: this.result(method, params) })
+        const result = this.result(method, params)
+        this.calls.push({ method, params, result })
+        for (const w of this.waiters.splice(0)) w()
+        return Response.json({ ok: true, result })
       },
     })
   }
@@ -101,8 +104,8 @@ export class FakeTelegram {
     })
   }
 
-  /** A message from `userId` in group `chatId`, optionally inside forum topic `threadId`. */
-  groupMsg(userId: number, chatId: number, text: string, threadId?: number): void {
+  /** A message from `userId` in group `chatId`, optionally inside forum topic `threadId` and replying to `replyTo`. */
+  groupMsg(userId: number, chatId: number, text: string, threadId?: number, replyTo?: number): void {
     this.updates.push({
       update_id: this.nextUpdateId++,
       message: {
@@ -112,12 +115,15 @@ export class FakeTelegram {
         from: { id: userId, is_bot: false, first_name: 'User', username: `user${userId}` },
         text,
         ...(threadId != null ? { message_thread_id: threadId, is_topic_message: true } : {}),
+        ...(replyTo != null
+          ? { reply_to_message: { message_id: replyTo, date: 0, chat: { id: chatId, type: 'supergroup' }, from: { id: 1, is_bot: true, first_name: 'Bot', username: 'test_bot' }, text: '…' } }
+          : {}),
       },
     })
   }
 
-  /** A tap by `userId` on a bot message in group `chatId`. */
-  groupTap(userId: number, chatId: number, data: string, messageId: number): void {
+  /** A tap by `userId` on a bot message in group `chatId` (pass `markup` for choice buttons). */
+  groupTap(userId: number, chatId: number, data: string, messageId: number, markup?: object, threadId?: number): void {
     this.updates.push({
       update_id: this.nextUpdateId++,
       callback_query: {
@@ -130,6 +136,8 @@ export class FakeTelegram {
           date: Math.floor(Date.now() / 1000),
           chat: { id: chatId, type: 'supergroup', title: 'Claude', is_forum: true },
           text: '…',
+          ...(markup ? { reply_markup: markup } : {}),
+          ...(threadId != null ? { message_thread_id: threadId, is_topic_message: true } : {}),
         },
       },
     })

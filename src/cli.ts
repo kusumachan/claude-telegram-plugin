@@ -161,6 +161,12 @@ export function parseSetting(key: string, value: string): unknown {
       if (!Number.isInteger(n) || n < 10 || n > 540) throw new CliError(`${key} must be an integer between 10 and 540`)
       return n
     }
+    case 'askTimeoutMinutes': {
+      const n = Number(value)
+      // Claude Code's own cap on a tool call is about 27h; stay well under it.
+      if (!Number.isInteger(n) || n < 1 || n > 720) throw new CliError(`${key} must be an integer between 1 and 720`)
+      return n
+    }
     case 'textChunkLimit':
     case 'maxPending': {
       const n = Number(value)
@@ -188,7 +194,7 @@ export function parseSetting(key: string, value: string): unknown {
     }
     default:
       throw new CliError(
-        `unknown key ${key}. Supported: ackReaction, replyToMode, chunkMode, textChunkLimit, maxPending, mentionPatterns, notify, notifyStopAfterSeconds, notifyPreview, approvals, approvalTimeoutSeconds, topicsGroup`,
+        `unknown key ${key}. Supported: ackReaction, replyToMode, chunkMode, textChunkLimit, maxPending, mentionPatterns, notify, notifyStopAfterSeconds, notifyPreview, approvals, approvalTimeoutSeconds, askTimeoutMinutes, topicsGroup`,
       )
   }
 }
@@ -209,7 +215,7 @@ function status(a: Access, now: number): string {
   for (const [id, g] of groups) {
     lines.push(`  ${id}  requireMention=${g.requireMention}  allowFrom=${g.allowFrom.join(',') || 'any'}`)
   }
-  const extras = (['ackReaction', 'replyToMode', 'chunkMode', 'textChunkLimit', 'maxPending', 'mentionPatterns', 'notify', 'notifyStopAfterSeconds', 'notifyPreview', 'approvals', 'approvalTimeoutSeconds', 'topicsGroup'] as const)
+  const extras = (['ackReaction', 'replyToMode', 'chunkMode', 'textChunkLimit', 'maxPending', 'mentionPatterns', 'notify', 'notifyStopAfterSeconds', 'notifyPreview', 'approvals', 'approvalTimeoutSeconds', 'askTimeoutMinutes', 'topicsGroup'] as const)
     .filter(k => a[k] !== undefined)
     .map(k => `${k}: ${JSON.stringify(a[k])}`)
   if (extras.length) lines.push(...extras)

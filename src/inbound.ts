@@ -21,6 +21,8 @@ export type InboundDeps = {
   botUsername: () => string
   /** Hand a message to Claude. Resolves false when nobody received it (e.g. no session connected). */
   deliver: (n: ChannelNotification) => Promise<boolean>
+  /** Extra check before a choice-button tap counts (e.g. ask_owner questions are allowlist-only). */
+  tapAllowed?: (chatId: string, messageId: number, senderId: string) => boolean
   log: (msg: string) => void
 }
 
@@ -363,7 +365,8 @@ async function handleChoiceTap(deps: InboundDeps, ctx: CallbackContext, data: st
   }
   const chatId = String(chat.id)
   const senderId = String(ctx.from.id)
-  if (!callbackAllowed(deps.store.load(), chat.type, chatId, senderId)) {
+  if (!callbackAllowed(deps.store.load(), chat.type, chatId, senderId)
+    || (deps.tapAllowed && !deps.tapAllowed(chatId, msg.message_id, senderId))) {
     await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
     return
   }
