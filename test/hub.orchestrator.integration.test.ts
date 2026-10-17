@@ -69,7 +69,7 @@ describe('orchestrator API', () => {
     expect(setup.topic).toBeUndefined()
 
     h.tg.groupMsg(USER, GROUP, '/task no topic here')
-    await sent(t => t === "Send /task in a project's topic.")
+    await sent(t => t.startsWith("Send /task in a project's topic"))
     h.tg.groupMsg(USER, GROUP, '/setup x y', thread)
     await sent(t => t === 'Send /setup in the General topic or a DM.')
 

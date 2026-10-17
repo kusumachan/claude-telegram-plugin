@@ -62,7 +62,7 @@ import { type ChannelNotification, registerInbound } from './src/inbound.ts'
 import { projectLabel } from './src/notify.ts'
 import { newRequestId, type PermissionRequest, PermissionRelay, type Recipient } from './src/permissions.ts'
 import { callTool, type ToolDeps } from './src/tools.ts'
-import { isMissingTopic, TopicStore, topicName, topicWelcome } from './src/topics.ts'
+import { controlTopic, isControlTopic, isMissingTopic, TopicStore, topicName, topicWelcome } from './src/topics.ts'
 import { safeSnippet } from './src/text.ts'
 import { TypingTracker } from './src/typing.ts'
 
@@ -186,11 +186,15 @@ async function topicFor(name: string): Promise<{ chatId: string; threadId: numbe
   const failedAt = topicFailures.get(name)
   if (failedAt && Date.now() - failedAt < TOPIC_RETRY_MS) return undefined
   try {
+    const control = isControlTopic(store.load(), name)
     const { threadId, created } = await topics.ensure(group, name,
-      async n => (await bot.api.createForumTopic(group, n)).message_thread_id)
+      async n => (await bot.api.createForumTopic(group, control ? `🎛 ${n}` : n)).message_thread_id)
     if (created) {
       log(`created topic "${name}" (#${threadId}) in ${group}`)
-      await bot.api.sendMessage(group, topicWelcome(name), { message_thread_id: threadId }).catch(() => {})
+      const welcome = control
+        ? '🎛 Orchestrator control. Write a new task as "project: request", or use /setup, /queue, /level here.'
+        : topicWelcome(name)
+      await bot.api.sendMessage(group, welcome, { message_thread_id: threadId }).catch(() => {})
     }
     return { chatId: group, threadId }
   } catch (err) {
@@ -202,7 +206,7 @@ async function topicFor(name: string): Promise<{ chatId: string; threadId: numbe
 
 /** Send an approval prompt to the project's topic, or allowlisted DMs. */
 async function requestApproval(req: PermissionRequest, name: string | undefined, access: Access): Promise<void> {
-  const topic = name ? await topicFor(name) : undefined
+  const topic = name && !isControlTopic(access, name) ? await topicFor(name) : undefined
   const targets: Recipient[] = topic ? [topic] : access.allowFrom
   const delivered = await relay.request(req, targets, Date.now(), name)
   if (delivered === 0 && topic && name) {
@@ -245,7 +249,7 @@ async function postQuestion(body: AskBody, access: Access): Promise<AskResult> {
   }
 
   const messages: QuestionMessage[] = []
-  const topic = await topicFor(body.topic)
+  const topic = isControlTopic(access, body.topic) ? undefined : await topicFor(body.topic)
   if (topic) {
     try {
       messages.push(await send(topic.chatId, topic.threadId))
@@ -574,6 +578,49 @@ async function finishPrompt(p: Prompt, answer: { label?: string; text?: string; 
   return true
 }
 
+/** Where the control topic is, if a topics group is set and the topic exists. */
+function controlThread(access: Access = store.load()): { group: string; threadId: number; key: string } | undefined {
+  const group = topicsGroupId(access)
+  if (!group) return undefined
+  const key = controlTopic(access)
+  const threadId = topics.get(group, key)
+  return threadId != null ? { group, threadId, key } : undefined
+}
+
+/**
+ * Plain messages in the control topic belong to the orchestrator — never to
+ * sessions, ask_owner or the inbox. (Answers to its own prompts there were
+ * already taken by answerPrompt.) Returns true when it's that topic.
+ */
+async function toControlTopic(n: ChannelNotification): Promise<boolean> {
+  const meta = n.meta
+  const ctl = controlThread()
+  if (!ctl || meta.chat_id !== ctl.group || Number(meta.thread_id) !== ctl.threadId) return false
+  if (meta.edited || !meta.user_id || !store.load().allowFrom.includes(meta.user_id)) return true
+  const say = (text: string) => bot.api.sendMessage(ctl.group, text, { message_thread_id: ctl.threadId }).catch(() => {})
+  if (meta.attachment_kind || meta.image_path) {
+    await say("Attachments aren't supported here. Send text.")
+    return true
+  }
+  const replyTo = meta.reply_to_message_id != null ? Number(meta.reply_to_message_id) : undefined
+  const delivered = toOrchestrator({
+    type: 'message',
+    text: n.content,
+    topic: ctl.key,
+    chat_id: ctl.group,
+    thread_id: ctl.threadId,
+    message_id: Number(meta.message_id),
+    user_id: meta.user_id,
+    user: senderLabel(meta),
+    ts: meta.ts ?? new Date().toISOString(),
+    // In a forum every message "replies" to the topic's first message; that one isn't a real reply.
+    ...(replyTo != null && replyTo !== ctl.threadId ? { reply_to_message_id: replyTo } : {}),
+  })
+  if (!delivered) await say('Orchestrator is not running.')
+  else void react(ctl.group, Number(meta.message_id), '👀')
+  return true
+}
+
 /** Bot commands for the orchestrator. Allowlisted senders, DMs or the topics group only. */
 async function handleOrchestratorCommand(ctx: Context, command: OrchestratorCommand): Promise<void> {
   const msg = ctx.message
@@ -585,11 +632,13 @@ async function handleOrchestratorCommand(ctx: Context, command: OrchestratorComm
   const group = topicsGroupId(access)
   if (ctx.chat.type !== 'private' && chatId !== group) return
   const thread = msg.is_topic_message ? msg.message_thread_id : undefined
-  const topic = group && chatId === group && thread != null ? topics.nameFor(group, thread) : undefined
+  const threadTopic = group && chatId === group && thread != null ? topics.nameFor(group, thread) : undefined
+  const control = isControlTopic(access, threadTopic)
+  const topic = control ? undefined : threadTopic
   const say = (text: string) => ctx.reply(text, thread != null ? { message_thread_id: thread } : {}).catch(() => {})
   const args = typeof ctx.match === 'string' ? ctx.match.trim() : ''
 
-  if (command === 'task' && !topic) return void say("Send /task in a project's topic.")
+  if (command === 'task' && !topic && !control) return void say('Send /task in a project\'s topic, or write "project: request" in the orchestrator topic.')
   if (command === 'task' && !args) return void say('Usage: /task <what to build or fix>')
   if (command === 'setup' && topic) return void say('Send /setup in the General topic or a DM.')
 
@@ -598,6 +647,7 @@ async function handleOrchestratorCommand(ctx: Context, command: OrchestratorComm
     command,
     args,
     ...(topic ? { topic } : {}),
+    ...(control ? { control: true as const } : {}),
     chat_id: chatId,
     ...(thread != null ? { thread_id: thread } : {}),
     message_id: msg.message_id,
@@ -631,6 +681,7 @@ function sessionKeyboard(chatId: string, prefix = 'use'): InlineKeyboard {
 async function deliver(n: ChannelNotification): Promise<boolean> {
   touch()
   if (await answerPrompt(n)) return false // consumed; stops the typing indicator
+  if (await toControlTopic(n)) return false
   if (await answerQuestion(n)) return false
   if (await queueForInbox(n)) return false
   const chatId = n.meta.chat_id!
@@ -802,7 +853,8 @@ async function handle(req: Request): Promise<Response> {
             if (!push(id, { type: 'ping' })) clearInterval(ping)
           }, 20_000)
           log(`session connected: ${info.name} (${cwd})`)
-          void topicFor(info.name).then(t => { if (t) sessionTopics.set(id, t.threadId) })
+          if (isControlTopic(store.load(), info.name)) log(`"${info.name}" is the orchestrator's control topic — this session gets no topic`)
+          else void topicFor(info.name).then(t => { if (t) sessionTopics.set(id, t.threadId) })
         },
         cancel() {
           clearInterval(ping)
@@ -902,7 +954,9 @@ async function handle(req: Request): Promise<Response> {
     case '/inbox/connect': {
       const p = body as InboxConnectBody
       if (!p.id || !p.topic) return json({ error: 'id and topic required' }, 400)
-      const s: InboxSession = { ...p, queue: inboxSessions.get(p.id)?.queue ?? [] }
+      const reserved = isControlTopic(store.load(), p.topic)
+      if (reserved) log(`inbox session ${p.name} asked for the control topic "${p.topic}" — it gets no topic`)
+      const s: InboxSession = { ...p, topic: reserved ? '' : p.topic, queue: inboxSessions.get(p.id)?.queue ?? [] }
       let ping: ReturnType<typeof setInterval>
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -913,8 +967,8 @@ async function handle(req: Request): Promise<Response> {
           ping = setInterval(() => {
             if (!push(`inbox:${p.id}`, { type: 'ping' })) clearInterval(ping)
           }, 20_000)
-          log(`inbox session connected: ${p.name} (topic ${p.topic})`)
-          void topicFor(p.topic) // so the owner has somewhere to write
+          log(`inbox session connected: ${p.name} (topic ${s.topic || 'none'})`)
+          if (s.topic) void topicFor(s.topic) // so the owner has somewhere to write
         },
         cancel() {
           clearInterval(ping)
@@ -947,6 +1001,7 @@ async function handle(req: Request): Promise<Response> {
             if (!toOrchestrator({ type: 'ping' })) clearInterval(ping)
           }, 20_000)
           log('orchestrator connected')
+          if (topicsGroupId()) void topicFor(controlTopic(store.load())) // its control topic
         },
         cancel() {
           clearInterval(ping)

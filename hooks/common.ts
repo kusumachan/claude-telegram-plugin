@@ -1,7 +1,7 @@
 /** Shared plumbing for the hook entry points. */
 import type { Access } from '../src/access.ts'
 import { STATE_DIR } from '../src/config.ts'
-import { isMissingTopic, TopicStore, topicWelcome } from '../src/topics.ts'
+import { isControlTopic, isMissingTopic, TopicStore, topicWelcome } from '../src/topics.ts'
 
 const SEND_TIMEOUT_MS = 10_000
 // Overridable for end-to-end tests against a local fake Bot API.
@@ -46,7 +46,8 @@ async function send(token: string, chatId: string, text: string, threadId?: numb
  */
 export async function sendNotice(token: string, access: Access, topic: string, text: string): Promise<void> {
   const group = access.topicsGroup && access.topicsGroup in access.groups ? access.topicsGroup : undefined
-  if (group) {
+  // The orchestrator's control topic isn't a project topic: sessions use DMs instead.
+  if (group && !isControlTopic(access, topic)) {
     const name = topic
     const topics = new TopicStore(STATE_DIR)
     for (let attempt = 0; attempt < 2; attempt++) {

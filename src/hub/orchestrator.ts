@@ -26,8 +26,10 @@ export type OrchestratorEvent =
       command: OrchestratorCommand
       /** Everything after the command, trimmed ("" when none). */
       args: string
-      /** The project topic it was sent in; absent in DMs and the General topic. */
+      /** The project topic it was sent in; absent in DMs, the General topic and the control topic. */
       topic?: string
+      /** Sent in the orchestrator's control topic. */
+      control?: true
       chat_id: string
       thread_id?: number
       message_id: number
@@ -35,6 +37,21 @@ export type OrchestratorEvent =
       /** "@username", or the first name when there's no username. */
       user: string
       ts: string
+    }
+  | {
+      /** A plain message in the control topic (not an answer to one of its prompts). */
+      type: 'message'
+      text: string
+      /** The control topic's key. */
+      topic: string
+      chat_id: string
+      thread_id: number
+      message_id: number
+      user_id: string
+      user: string
+      ts: string
+      /** Set when it replies to a specific message (e.g. one of the orchestrator's notices). */
+      reply_to_message_id?: number
     }
   | {
       type: 'prompt_answer'

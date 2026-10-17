@@ -52,6 +52,12 @@ export type Access = {
    * own topic. Notifications and approval prompts go there instead of DMs.
    */
   topicsGroup?: string
+  /**
+   * Key of the orchestrator's control topic in the topics group (default
+   * "Orchestrator"). Plain messages there go to the orchestrator; no
+   * session can use it as its project topic.
+   */
+  orchestratorTopic?: string
 }
 
 export const PAIRING_TTL_MS = 60 * 60 * 1000

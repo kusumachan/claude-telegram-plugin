@@ -183,11 +183,13 @@ In `-p` (headless) runs Claude Code cancels async hooks at teardown, so a "finis
 
 A separate long-running process on the same machine (an orchestrator that runs Claude Code sessions for tasks) can use the hub too: [`src/hub/orchestrator.ts`](src/hub/orchestrator.ts) has the wire types and a small `OrchestratorClient`. It uses the same transport as everything else: HTTP over the hub's 0700 unix socket.
 
-**Commands in.** `/task <request>` (in a project topic), and `/queue`, `/cancel <id>`, `/level <0|1|2>` (topic or DM), `/setup <name> <repo-url>` (General topic or DM). These go to the orchestrator as `command` events, never to a session, and the bot reacts 👀. Only allowlisted senders, in DMs or the topics group. With no orchestrator connected the bot replies "Orchestrator is not running." Plain messages keep the routing above.
+**Control topic.** When the orchestrator connects (with a topics group set), the hub creates a `🎛 Orchestrator` topic. Its key is `orchestratorTopic` in access, default `Orchestrator`. Every allowlisted plain message there goes to the orchestrator as a `message` event, never to a session, `ask_owner` or an inbox. The exception is answers to the orchestrator's own prompts there, which still arrive as `prompt_answer`. The bot reacts 👀. Attachments get "not supported", and with no orchestrator connected the bot replies "Orchestrator is not running." No session can use this key as its project topic: its questions, approvals and notices go to DMs instead.
+
+**Commands in.** `/task <request>` (in a project topic), and `/queue`, `/cancel <id>`, `/level <0|1|2>` (topic or DM), `/setup <name> <repo-url>` (General topic, control topic or DM). Commands sent in the control topic carry `control: true` and no `topic`. These go to the orchestrator as `command` events, never to a session, and the bot reacts 👀. Only allowlisted senders, in DMs or the topics group. With no orchestrator connected the bot replies "Orchestrator is not running." Plain messages keep the routing above.
 
 | Endpoint | Body | Returns |
 | --- | --- | --- |
-| `POST /orchestrator/connect` | `{}` | NDJSON stream: `hello`, `ping`, `command`, `prompt_answer`. One orchestrator at a time: the newest connection wins. |
+| `POST /orchestrator/connect` | `{}` | NDJSON stream: `hello`, `ping`, `command`, `message`, `prompt_answer`. One orchestrator at a time: the newest connection wins. |
 | `POST /prompt` | `{ key?, topic?, text, buttons?, needs_text?, files?, format? }` | `{ id, message_ids }` or `{ error }` |
 | `POST /prompt/ack` | `{ id }` | `{ ok }`: stop re-sending that answer |
 | `POST /prompt/cancel` | `{ id, note? }` | `{ ok }`: buttons removed, `✖️ note` posted under it |
