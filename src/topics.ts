@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { withLockAsync } from './lock.ts'
+import { projectLabel } from './notify.ts'
 
 /**
  * Forum topics per session/project in the configured topics group:
@@ -85,6 +86,17 @@ export function topicWelcome(name: string): string {
 /** The project a cwd belongs to: worktrees share their repo's topic. */
 export function topicName(label: string): string {
   return label.split('/')[0] || label
+}
+
+/**
+ * Overrides which project topic a session's approvals, notices and questions
+ * go to. Set by launchers whose cwd doesn't name the project.
+ */
+export const TOPIC_ENV = 'TELEGRAM_PLUS_TOPIC'
+
+/** The topic for a (non-channel) session: TELEGRAM_PLUS_TOPIC, else its project folder. */
+export function sessionTopic(cwd: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
+  return env[TOPIC_ENV]?.trim() || topicName(projectLabel(cwd))
 }
 
 /** Telegram's error when posting to a topic that no longer exists. */

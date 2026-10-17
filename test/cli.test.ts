@@ -66,6 +66,9 @@ describe('cli', () => {
     expect(a.ackReaction).toBe('')
     expect(() => run(['set', 'mentionPatterns', '["("]'], dir)).toThrow(/invalid regex/)
     expect(() => run(['set', 'bogus', 'x'], dir)).toThrow(/unknown key/)
+    run(['set', 'askTimeoutMinutes', '60'], dir)
+    expect(store().load().askTimeoutMinutes).toBe(60)
+    expect(() => run(['set', 'askTimeoutMinutes', '0'], dir)).toThrow(/between 1 and 720/)
   })
 
   test('status prints a summary', () => {

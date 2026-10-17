@@ -17,6 +17,20 @@ import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { join } from 'path'
 import { Bot, GrammyError, InlineKeyboard, type Context } from 'grammy'
 import { AccessStore, type Access } from './src/access.ts'
+import {
+  type AskBody,
+  type AskResult,
+  type AskWaitBody,
+  type AskWaitResult,
+  MAX_QUESTION_CHARS,
+  parseAskButtons,
+  type Question,
+  type QuestionMessage,
+  QuestionStore,
+  questionHeader,
+  questionText,
+} from './src/ask.ts'
+import { buildKeyboard } from './src/buttons.ts'
 import { APPROVED_DIR, INBOX_DIR, INBOX_MAX_AGE_MS, loadEnvFile, STATE_DIR } from './src/config.ts'
 import { cleanInbox } from './src/files.ts'
 import { callbackAllowed, dmCommandAllowed } from './src/gate.ts'
@@ -36,7 +50,8 @@ import { type ChannelNotification, registerInbound } from './src/inbound.ts'
 import { projectLabel } from './src/notify.ts'
 import { newRequestId, type PermissionRequest, PermissionRelay, type Recipient } from './src/permissions.ts'
 import { callTool, type ToolDeps } from './src/tools.ts'
-import { TopicStore, topicName, topicWelcome } from './src/topics.ts'
+import { isMissingTopic, TopicStore, topicName, topicWelcome } from './src/topics.ts'
+import { safeSnippet } from './src/text.ts'
 import { TypingTracker } from './src/typing.ts'
 
 const log = (msg: string) => process.stderr.write(`${new Date().toISOString()} hub: ${msg}\n`)
@@ -185,6 +200,122 @@ async function requestApproval(req: PermissionRequest, name: string | undefined,
   }
 }
 
+// --- questions (ask_owner) -----------------------------------------------------
+
+const questions = new QuestionStore(STATE_DIR)
+/** Question id → ask_owner calls waiting for its answer right now. */
+const askWaiters = new Map<string, Set<() => void>>()
+
+function wakeAskWaiters(id: string): void {
+  for (const wake of askWaiters.get(id) ?? []) wake()
+  askWaiters.delete(id)
+}
+
+async function postQuestion(body: AskBody, access: Access): Promise<AskResult> {
+  const question = body.question.trim()
+  if (question.length > MAX_QUESTION_CHARS) {
+    return { error: `question is ${question.length} chars; keep it under ${MAX_QUESTION_CHARS} (put the details in a file or a reply first)` }
+  }
+  let rows: string[][] | undefined
+  try {
+    rows = parseAskButtons(body.buttons)
+    buildKeyboard(rows) // same limits as reply buttons
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
+  const text = questionText(body.asker, question, !!rows)
+  const send = async (chatId: string, threadId?: number): Promise<QuestionMessage> => {
+    const sent = await bot.api.sendMessage(chatId, text, {
+      ...(rows ? { reply_markup: buildKeyboard(rows) } : {}),
+      ...(threadId != null ? { message_thread_id: threadId } : {}),
+    })
+    return { chatId, messageId: sent.message_id, ...(threadId != null ? { threadId } : {}) }
+  }
+
+  const messages: QuestionMessage[] = []
+  const topic = await topicFor(body.topic)
+  if (topic) {
+    try {
+      messages.push(await send(topic.chatId, topic.threadId))
+    } catch (err) {
+      // Topic deleted in Telegram: forget it (recreated next time), use DMs now.
+      if (err instanceof GrammyError && isMissingTopic(err.description)) topics.forget(topic.chatId, body.topic)
+      log(`question to topic "${body.topic}" failed (${err}) — using DMs`)
+    }
+  }
+  if (messages.length === 0) {
+    for (const chatId of access.allowFrom) {
+      try {
+        messages.push(await send(chatId))
+      } catch (err) {
+        log(`question to ${chatId} failed: ${err}`)
+      }
+    }
+  }
+  if (messages.length === 0) return { error: 'could not post the question to Telegram (see hub.log)' }
+  const q = questions.add({ session: body.session, asker: body.asker, question, askedAt: Date.now(), messages })
+  log(`question ${q.id} from ${body.asker} posted`)
+  return { id: q.id }
+}
+
+/** Show the answer under every copy of the question and drop its buttons. */
+async function closeQuestion(q: Question, note: string): Promise<void> {
+  const text = `${questionHeader(q.asker, q.question)}\n\n${note}`
+  await Promise.all(q.messages.map(m =>
+    bot.api.editMessageText(m.chatId, m.messageId, text, { reply_markup: { inline_keyboard: [] } }).catch(() => {}),
+  ))
+}
+
+/**
+ * Is this inbound message an answer to an open question? A button tap on the
+ * question, a reply to it, or — when exactly one question is open in that
+ * chat/topic — any other message there, except a reply to a session's
+ * message. Only allowlisted users can answer, the same as approvals. Returns
+ * true when the message was consumed.
+ */
+async function answerQuestion(n: ChannelNotification): Promise<boolean> {
+  const meta = n.meta
+  if (meta.edited || !meta.user_id || !store.load().allowFrom.includes(meta.user_id)) return false
+  const chatId = meta.chat_id!
+  const thread = meta.thread_id != null ? Number(meta.thread_id) : undefined
+  const ref = meta.button_message_id ?? meta.reply_to_message_id
+  const refQuestion = ref != null ? questions.byMessage(chatId, Number(ref)) : undefined
+
+  let q: Question | undefined
+  if (refQuestion) {
+    q = refQuestion
+    if (q.answer) {
+      await bot.api.sendMessage(chatId, 'That question was already answered.', { message_thread_id: thread }).catch(() => {})
+      return true
+    }
+  } else {
+    // A tap on another message's buttons, or a reply meant for a session.
+    // (In a forum topic every message "replies" to the topic's first
+    // message, so other replies don't rule a message out.)
+    if (meta.button_message_id != null) return false
+    if (ref != null && router.ownerOf(chatId, Number(ref))) return false
+    const open = questions.openIn(chatId, thread)
+    if (open.length === 0) return false
+    if (open.length > 1) {
+      await bot.api.sendMessage(chatId,
+        `${open.length} questions are open here. Reply to the one you're answering (or tap its button).`,
+        { message_thread_id: thread }).catch(() => {})
+      return true
+    }
+    q = open[0]!
+  }
+
+  const by = meta.user ? (/^\d+$/.test(meta.user) ? meta.user_name || meta.user : `@${meta.user}`) : 'owner'
+  if (!questions.answer(q.id, n.content, by)) return true
+  log(`question ${q.id} answered by ${by}`)
+  wakeAskWaiters(q.id)
+  await closeQuestion(q, `→ ${safeSnippet(n.content, 200) ?? n.content} (${by})`)
+  if (!meta.button_choice && meta.message_id) {
+    void bot.api.setMessageReaction(chatId, Number(meta.message_id), [{ type: 'emoji', emoji: '👍' }]).catch(() => {})
+  }
+  return true
+}
+
 // --- routing inbound messages ---------------------------------------------
 
 const held = new Map<string, ChannelNotification[]>()
@@ -202,6 +333,7 @@ function sessionKeyboard(chatId: string, prefix = 'use'): InlineKeyboard {
 
 async function deliver(n: ChannelNotification): Promise<boolean> {
   touch()
+  if (await answerQuestion(n)) return false // consumed; stops the typing indicator
   const chatId = n.meta.chat_id!
   const replyTo = n.meta.reply_to_message_id ?? n.meta.button_message_id
   const group = topicsGroupId()
@@ -316,6 +448,9 @@ registerInbound({
   inboxDir: INBOX_DIR,
   botUsername: () => botUsername,
   deliver,
+  // A question's buttons answer it, so only allowlisted users may tap them.
+  tapAllowed: (chatId, messageId, senderId) =>
+    !questions.byMessage(chatId, messageId) || store.load().allowFrom.includes(senderId),
   log,
 })
 
@@ -339,7 +474,7 @@ async function handle(req: Request): Promise<Response> {
     return json({ ok: true, pid: process.pid, sessions: router.size })
   }
   if (req.method === 'GET' && pathname === '/status') {
-    return json({ sessions: router.list(), pendingApprovals: hookRequests.size })
+    return json({ sessions: router.list(), pendingApprovals: hookRequests.size, openQuestions: questions.openCount })
   }
   if (req.method !== 'POST') return json({ error: 'not found' }, 404)
 
@@ -426,7 +561,7 @@ async function handle(req: Request): Promise<Response> {
       req.signal.addEventListener('abort', () => finishHookRequest(id, '✔︎ Handled in the terminal'))
       await requestApproval(
         { request_id: id, tool_name: p.tool_name, description, input_preview: previewInput(p.tool_input) },
-        topicName(projectLabel(p.cwd)),
+        p.topic || topicName(projectLabel(p.cwd)),
         access,
       )
       return json(await result)
@@ -447,6 +582,46 @@ async function handle(req: Request): Promise<Response> {
         void relay.cancel(id, '✔︎ Answered in the terminal')
       }
       return json({ ok: true })
+    }
+
+    case '/ask': {
+      const p = body as AskBody
+      if (!p.session || typeof p.question !== 'string' || !p.question.trim()) return json({ error: 'session and question required' }, 400)
+      // Asked again after "no answer yet": same question, not posted twice.
+      const known = questions.find(p.session, p.question)
+      if (known) return json({ id: known.id } satisfies AskResult)
+      const access = store.load()
+      if (access.allowFrom.length === 0) {
+        return json({ error: 'nobody to ask: no Telegram user is allowlisted (pair one with /telegram-plus:access)' } satisfies AskResult)
+      }
+      return json(await postQuestion(p, access))
+    }
+
+    case '/ask/wait': {
+      const { id, wait_ms } = body as AskWaitBody
+      const collect = (): AskWaitResult | undefined => {
+        const q = questions.get(id)
+        if (!q) return { status: 'unknown' }
+        const a = questions.take(id)
+        return a ? { status: 'answered', answer: a.text, by: a.by } : undefined
+      }
+      const now = collect()
+      if (now) return json(now)
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(done, Math.max(0, Math.min(Number(wait_ms) || 0, 60_000)))
+        req.signal.addEventListener('abort', done)
+        const set = askWaiters.get(id) ?? new Set()
+        set.add(done)
+        askWaiters.set(id, set)
+        function done() {
+          clearTimeout(timer)
+          set.delete(done)
+          resolve()
+        }
+      })
+      // The caller went away (tool call cancelled): leave the answer stored.
+      if (req.signal.aborted) return json({ status: 'pending' } satisfies AskWaitResult)
+      return json(collect() ?? ({ status: 'pending' } satisfies AskWaitResult))
     }
 
     default:
@@ -475,6 +650,11 @@ function checkApprovals(): void {
 }
 setInterval(checkApprovals, 5000).unref()
 setInterval(() => void relay.prune(), 60_000).unref()
+const pruneQuestions = () => {
+  for (const q of questions.prune()) void closeQuestion(q, '⌛ Expired — nobody is waiting for this answer anymore')
+}
+pruneQuestions()
+setInterval(pruneQuestions, 60 * 60 * 1000).unref()
 const sweepInbox = () => {
   const n = cleanInbox(INBOX_DIR, INBOX_MAX_AGE_MS)
   if (n) log(`removed ${n} old inbox file(s)`)
@@ -501,7 +681,8 @@ process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))
 
 setInterval(() => {
-  if (streams.size === 0 && hookRequests.size === 0 && Date.now() - lastActivity > HUB_IDLE_MS) {
+  // Open questions keep the hub polling: their answer can come any time.
+  if (streams.size === 0 && hookRequests.size === 0 && questions.openCount === 0 && Date.now() - lastActivity > HUB_IDLE_MS) {
     shutdown(`idle for ${Math.round(HUB_IDLE_MS / 60000)}m with no sessions`)
   }
 }, Math.min(60_000, HUB_IDLE_MS)).unref()

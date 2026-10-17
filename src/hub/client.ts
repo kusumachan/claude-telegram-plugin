@@ -71,13 +71,14 @@ export class HubClient {
     throw new Error(`hub did not come up within ${timeoutMs}ms — see ${join(this.stateDir, 'hub.log')}`)
   }
 
-  async post<T>(path: string, body: unknown, timeoutMs = 30_000): Promise<T> {
+  async post<T>(path: string, body: unknown, timeoutMs = 30_000, signal?: AbortSignal): Promise<T> {
+    const timeout = AbortSignal.timeout(timeoutMs)
     const res = await fetch(`http://hub${path}`, {
       unix: this.socket,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
     })
     if (!res.ok) throw new Error(`hub ${path}: HTTP ${res.status} ${await res.text()}`)
     return (await res.json()) as T
@@ -137,6 +138,8 @@ export type PermissionRequestBody = {
 export type HookPermissionBody = {
   session_id: string
   cwd?: string
+  /** Project topic to post the prompt in; derived from cwd when absent. */
+  topic?: string
   tool_name: string
   tool_input?: unknown
 }

@@ -15,12 +15,12 @@ import { HubClient } from '../src/hub/client.ts'
 import {
   decide,
   type HookInput,
-  projectLabel,
   notifyEnabled,
   pruneSessionState,
   readSessionState,
   writeSessionState,
 } from '../src/notify.ts'
+import { sessionTopic } from '../src/topics.ts'
 import { readHookInput, sendNotice } from './common.ts'
 
 async function main(): Promise<void> {
@@ -52,7 +52,7 @@ async function main(): Promise<void> {
   const decision = decide(input, access, state)
   if (decision.state) writeSessionState(STATE_DIR, input.session_id, decision.state)
   if (input.hook_event_name === 'UserPromptSubmit') pruneSessionState(STATE_DIR)
-  if (decision.send) await sendNotice(token, access, projectLabel(input.cwd), decision.text)
+  if (decision.send) await sendNotice(token, access, sessionTopic(input.cwd), decision.text)
 }
 
 await main().catch(err => process.stderr.write(`telegram notify hook: ${err}\n`))

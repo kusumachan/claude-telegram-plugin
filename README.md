@@ -95,6 +95,25 @@ Everyone in the group can read what's posted there, including approval prompts w
 | `react` | Emoji reaction from Telegram's fixed whitelist. |
 | `edit_message` | Edit a message the bot sent (progress updates). Optional `buttons` replaces the keyboard; `[]` removes it. |
 | `download_attachment` | Fetch an inbound attachment by `attachment_file_id` into the inbox (≤20MB). |
+| `ask_owner` | Ask the owner a question and **block until they answer**. `question`, optional `buttons` (rows of labels). Works in every session, channel or not. See below. |
+
+## Asking the owner (`ask_owner`)
+
+Any session with the plugin enabled, including one not started with the launcher, can ask a question on Telegram and wait for the answer:
+
+```json
+{ "question": "Use Postgres or MySQL for project-x?", "buttons": [["Postgres", "MySQL"]] }
+```
+
+- The question is labeled with the session's name (`TELEGRAM_PLUS_NAME`, else the folder) and goes to the session's **project topic** when a topics group is set, otherwise to allowlisted DMs. The project is `TELEGRAM_PLUS_TOPIC` if set, else the session's folder (worktrees share their repo's topic). The same rule places that session's approvals and notices.
+- The owner taps a button or types the answer. A reply to the question always counts. When it's the only open question in that topic or DM, any message there counts (except a reply to a session's message). With several open, a plain message gets a "reply to the one you're answering" hint. Only allowlisted users can answer, the same as approvals.
+- The tool returns the answer text: the button label, or the typed reply.
+- While it waits it sends MCP progress every 5s, because Claude Code aborts a tool call that is silent for 30s. After `askTimeoutMinutes` (default 240) it returns *"No answer yet; the question is still open…"*. Calling it again with the same question keeps waiting on the same question: it isn't posted twice, and an answer given in between is returned.
+- Questions are kept in `<state-dir>/questions.json`, so they survive a hub restart. The hub keeps polling while any question is open, and drops questions nobody came back for after 7 days.
+
+```
+/telegram-plus:access set askTimeoutMinutes 60
+```
 
 ## Choice buttons
 
