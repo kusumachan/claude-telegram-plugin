@@ -10,6 +10,10 @@ export type Harness = {
   dir: string
   /** Connect a fake channel session; returns its event log and a disconnect fn. */
   connect(id: string, name: string, cwd?: string): { events: HubEvent[]; close(): void }
+  /** Connect as the orchestrator. */
+  connectOrchestrator(): { events: HubEvent[]; close(): void }
+  /** Register an inbox session (what server.ts does with TELEGRAM_PLUS_INBOX=1). */
+  connectInbox(id: string, name: string, topic: string): { events: HubEvent[]; close(): void }
   waitEvent(events: HubEvent[], pred: (e: HubEvent) => boolean, timeoutMs?: number): Promise<HubEvent>
   stop(): Promise<void>
 }
@@ -40,27 +44,13 @@ export async function startHub(access: object, files: Record<string, string> = {
     hub,
     dir,
     connect(id, name, cwd = `/code/${name}`) {
-      const events: HubEvent[] = []
-      const ac = new AbortController()
-      aborts.push(ac)
-      void fetch('http://hub/session/connect', {
-        unix: hub.socket,
-        method: 'POST',
-        body: JSON.stringify({ id, name, cwd }),
-        signal: ac.signal,
-      }).then(async res => {
-        const decoder = new TextDecoder()
-        let buf = ''
-        for await (const chunk of res.body!) {
-          buf += decoder.decode(chunk, { stream: true })
-          let nl: number
-          while ((nl = buf.indexOf('\n')) >= 0) {
-            events.push(JSON.parse(buf.slice(0, nl)))
-            buf = buf.slice(nl + 1)
-          }
-        }
-      }).catch(() => {})
-      return { events, close: () => ac.abort() }
+      return stream('/session/connect', { id, name, cwd })
+    },
+    connectOrchestrator() {
+      return stream('/orchestrator/connect', {})
+    },
+    connectInbox(id, name, topic) {
+      return stream('/inbox/connect', { id, name, topic, cwd: `/code/${topic}` })
     },
     async waitEvent(events, pred, timeoutMs = 5000) {
       const deadline = Date.now() + timeoutMs
@@ -78,6 +68,30 @@ export async function startHub(access: object, files: Record<string, string> = {
       tg.stop()
       rmSync(dir, { recursive: true, force: true })
     },
+  }
+
+  function stream(path: string, body: object): { events: HubEvent[]; close(): void } {
+    const events: HubEvent[] = []
+    const ac = new AbortController()
+    aborts.push(ac)
+    void fetch(`http://hub${path}`, {
+      unix: hub.socket,
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal: ac.signal,
+    }).then(async res => {
+      const decoder = new TextDecoder()
+      let buf = ''
+      for await (const chunk of res.body!) {
+        buf += decoder.decode(chunk, { stream: true })
+        let nl: number
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          events.push(JSON.parse(buf.slice(0, nl)))
+          buf = buf.slice(nl + 1)
+        }
+      }
+    }).catch(() => {})
+    return { events, close: () => ac.abort() }
   }
 }
 

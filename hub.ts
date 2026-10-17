@@ -31,6 +31,18 @@ import {
   questionText,
 } from './src/ask.ts'
 import { buildKeyboard } from './src/buttons.ts'
+import { type InboxConnectBody, type InboxMessage, type InboxTakeBody, type InboxTakeResult } from './src/inbox.ts'
+import {
+  type NoticeBody,
+  type NoticeResult,
+  ORCHESTRATOR_COMMANDS,
+  type OrchestratorCommand,
+  type OrchestratorEvent,
+  type PromptBody,
+  type PromptResult,
+  type TopicResult,
+} from './src/hub/orchestrator.ts'
+import { type Prompt, type PromptMessage, PromptStore } from './src/prompts.ts'
 import { APPROVED_DIR, INBOX_DIR, INBOX_MAX_AGE_MS, loadEnvFile, STATE_DIR } from './src/config.ts'
 import { cleanInbox } from './src/files.ts'
 import { callbackAllowed, dmCommandAllowed } from './src/gate.ts'
@@ -50,7 +62,7 @@ import { type ChannelNotification, registerInbound } from './src/inbound.ts'
 import { projectLabel } from './src/notify.ts'
 import { newRequestId, type PermissionRequest, PermissionRelay, type Recipient } from './src/permissions.ts'
 import { callTool, type ToolDeps } from './src/tools.ts'
-import { isMissingTopic, TopicStore, topicName, topicWelcome } from './src/topics.ts'
+import { controlTopic, isControlTopic, isMissingTopic, TopicStore, topicName, topicWelcome } from './src/topics.ts'
 import { safeSnippet } from './src/text.ts'
 import { TypingTracker } from './src/typing.ts'
 
@@ -174,11 +186,15 @@ async function topicFor(name: string): Promise<{ chatId: string; threadId: numbe
   const failedAt = topicFailures.get(name)
   if (failedAt && Date.now() - failedAt < TOPIC_RETRY_MS) return undefined
   try {
+    const control = isControlTopic(store.load(), name)
     const { threadId, created } = await topics.ensure(group, name,
-      async n => (await bot.api.createForumTopic(group, n)).message_thread_id)
+      async n => (await bot.api.createForumTopic(group, control ? `🎛 ${n}` : n)).message_thread_id)
     if (created) {
       log(`created topic "${name}" (#${threadId}) in ${group}`)
-      await bot.api.sendMessage(group, topicWelcome(name), { message_thread_id: threadId }).catch(() => {})
+      const welcome = control
+        ? '🎛 Orchestrator control. Write a new task as "project: request", or use /setup, /queue, /level here.'
+        : topicWelcome(name)
+      await bot.api.sendMessage(group, welcome, { message_thread_id: threadId }).catch(() => {})
     }
     return { chatId: group, threadId }
   } catch (err) {
@@ -190,7 +206,7 @@ async function topicFor(name: string): Promise<{ chatId: string; threadId: numbe
 
 /** Send an approval prompt to the project's topic, or allowlisted DMs. */
 async function requestApproval(req: PermissionRequest, name: string | undefined, access: Access): Promise<void> {
-  const topic = name ? await topicFor(name) : undefined
+  const topic = name && !isControlTopic(access, name) ? await topicFor(name) : undefined
   const targets: Recipient[] = topic ? [topic] : access.allowFrom
   const delivered = await relay.request(req, targets, Date.now(), name)
   if (delivered === 0 && topic && name) {
@@ -233,7 +249,7 @@ async function postQuestion(body: AskBody, access: Access): Promise<AskResult> {
   }
 
   const messages: QuestionMessage[] = []
-  const topic = await topicFor(body.topic)
+  const topic = isControlTopic(access, body.topic) ? undefined : await topicFor(body.topic)
   if (topic) {
     try {
       messages.push(await send(topic.chatId, topic.threadId))
@@ -254,6 +270,7 @@ async function postQuestion(body: AskBody, access: Access): Promise<AskResult> {
   }
   if (messages.length === 0) return { error: 'could not post the question to Telegram (see hub.log)' }
   const q = questions.add({ session: body.session, asker: body.asker, question, askedAt: Date.now(), messages })
+  recordInboxOwner(messages, body.session) // later replies to it reach the asker's inbox
   log(`question ${q.id} from ${body.asker} posted`)
   return { id: q.id }
 }
@@ -284,6 +301,7 @@ async function answerQuestion(n: ChannelNotification): Promise<boolean> {
   let q: Question | undefined
   if (refQuestion) {
     q = refQuestion
+    if (q.answer && inboxSessions.has(q.session)) return false // a follow-up: goes to the asker's inbox
     if (q.answer) {
       await bot.api.sendMessage(chatId, 'That question was already answered.', { message_thread_id: thread }).catch(() => {})
       return true
@@ -316,6 +334,335 @@ async function answerQuestion(n: ChannelNotification): Promise<boolean> {
   return true
 }
 
+// --- owner-message inbox ---------------------------------------------------------
+
+type InboxSession = InboxConnectBody & { queue: InboxMessage[] }
+/** Sessions that opted in with TELEGRAM_PLUS_INBOX, by session id, while connected. */
+const inboxSessions = new Map<string, InboxSession>()
+/** `${chatId}:${messageId}` → inbox session id that sent it. Bounded, insertion-ordered. */
+const inboxOwners = new Map<string, string>()
+const MAX_INBOX_OWNED = 5000
+const MAX_INBOX_QUEUE = 50
+
+function recordInboxOwner(messages: { chatId: string; messageId: number }[], sessionId: string): void {
+  for (const m of messages) {
+    inboxOwners.set(`${m.chatId}:${m.messageId}`, sessionId)
+    if (inboxOwners.size > MAX_INBOX_OWNED) inboxOwners.delete(inboxOwners.keys().next().value!)
+  }
+}
+
+const react = (chatId: string, messageId: number, emoji: '👀' | '👍') =>
+  bot.api.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji }]).catch(() => {})
+
+/**
+ * Queue an owner message for an inbox session: a reply to (or tap on) one of
+ * its messages, or any message in the topic of exactly one inbox session.
+ * Runs after ask_owner's answer matching, so a plain message still answers
+ * the single open question there. Returns true when consumed.
+ */
+async function queueForInbox(n: ChannelNotification): Promise<boolean> {
+  if (inboxSessions.size === 0) return false
+  const meta = n.meta
+  if (meta.edited || !meta.user_id || !store.load().allowFrom.includes(meta.user_id)) return false
+  const chatId = meta.chat_id!
+  const thread = meta.thread_id != null ? Number(meta.thread_id) : undefined
+  const ref = meta.button_message_id ?? meta.reply_to_message_id
+
+  let target: InboxSession | undefined
+  const owner = ref != null ? inboxOwners.get(`${chatId}:${ref}`) : undefined
+  if (owner && inboxSessions.has(owner)) {
+    target = inboxSessions.get(owner)
+  } else {
+    if (ref != null && router.ownerOf(chatId, Number(ref))) return false // meant for a channel session
+    const group = topicsGroupId()
+    const topic = group && chatId === group && thread != null ? topics.nameFor(group, thread) : undefined
+    if (!topic) return false
+    const here = [...inboxSessions.values()].filter(s => s.topic === topic)
+    if (here.length === 0) return false
+    if (here.length > 1) {
+      await bot.api.sendMessage(chatId,
+        `${here.length} agents are running here (${here.map(s => s.name).join(', ')}). Reply to a message from the one you mean.`,
+        { message_thread_id: thread }).catch(() => {})
+      return true
+    }
+    target = here[0]!
+  }
+  if (!target) return false
+
+  if (meta.attachment_kind || meta.image_path) {
+    await bot.api.sendMessage(chatId, `Attachments aren't supported for agents. Send ${target.name} text instead.`,
+      { message_thread_id: thread }).catch(() => {})
+    return true
+  }
+  if (target.queue.length >= MAX_INBOX_QUEUE) {
+    await bot.api.sendMessage(chatId, `${target.name} already has ${MAX_INBOX_QUEUE} unread messages. Wait for it to catch up.`,
+      { message_thread_id: thread }).catch(() => {})
+    return true
+  }
+  const by = meta.user ? (/^\d+$/.test(meta.user) ? meta.user_name || meta.user : `@${meta.user}`) : 'owner'
+  target.queue.push({ chatId, messageId: Number(meta.message_id), threadId: thread, text: n.content, by, at: Date.now() })
+  if (!meta.button_choice) void react(chatId, Number(meta.message_id), '👀') // queued
+  log(`queued a message for ${target.name} (${target.queue.length} waiting)`)
+  return true
+}
+
+/** Hand everything queued to the session's hook, oldest first, and mark it delivered. */
+function takeInbox(sessionId: string): InboxMessage[] {
+  const s = inboxSessions.get(sessionId)
+  if (!s || s.queue.length === 0) return []
+  const messages = s.queue.splice(0)
+  for (const m of messages) if (m.messageId) void react(m.chatId, m.messageId, '👍') // delivered
+  log(`delivered ${messages.length} message(s) to ${s.name}`)
+  return messages
+}
+
+/** The session ended: tell the owner what it never read. */
+async function closeInbox(s: InboxSession): Promise<void> {
+  if (s.queue.length === 0) return
+  const byChat = new Map<string, InboxMessage[]>()
+  for (const m of s.queue) byChat.set(`${m.chatId}:${m.threadId ?? ''}`, [...(byChat.get(`${m.chatId}:${m.threadId ?? ''}`) ?? []), m])
+  for (const ms of byChat.values()) {
+    const first = ms[0]!
+    await bot.api.sendMessage(first.chatId,
+      `⚠️ ${s.name} ended before reading ${ms.length === 1 ? 'your message' : `${ms.length} of your messages`}. ${ms.length === 1 ? 'It was' : 'They were'} not delivered.`,
+      { message_thread_id: first.threadId, reply_parameters: { message_id: first.messageId, allow_sending_without_reply: true } },
+    ).catch(err => log(`undelivered notice failed: ${err}`))
+  }
+}
+
+// --- orchestrator -------------------------------------------------------------------
+
+const ORCHESTRATOR_STREAM = 'orchestrator'
+const prompts = new PromptStore(STATE_DIR)
+
+/** Push to the connected orchestrator. False when it isn't connected. */
+function toOrchestrator(e: OrchestratorEvent): boolean {
+  return push(ORCHESTRATOR_STREAM, e as unknown as HubEvent)
+}
+
+function answerEvent(p: Prompt): OrchestratorEvent {
+  return { type: 'prompt_answer', id: p.id, ...(p.key ? { key: p.key } : {}), ...p.answer! }
+}
+
+type Sent = { messages: PromptMessage[]; error?: string }
+
+/**
+ * Send through the reply tool's code path (chunking, files, markup
+ * fallback) to a project topic, or to every allowlisted DM when there's no
+ * topic or it can't be used.
+ */
+async function sendTo(topicKey: string | undefined, args: Record<string, unknown>): Promise<Sent> {
+  const access = store.load()
+  const once = async (chatId: string, threadId?: number): Promise<Sent> => {
+    const r = await callTool(toolDeps, 'reply', { ...args, chat_id: chatId, ...(threadId != null ? { thread_id: String(threadId) } : {}) })
+    const messages = (r.sentIds ?? []).map(messageId => ({ chatId, messageId, ...(threadId != null ? { threadId } : {}) }))
+    return { messages, ...(r.isError ? { error: r.content[0]?.text ?? 'send failed' } : {}) }
+  }
+  if (topicKey) {
+    const topic = await topicFor(topicKey)
+    if (topic) {
+      const r = await once(topic.chatId, topic.threadId)
+      if (!r.error || r.messages.length) return r
+      if (isMissingTopic(r.error)) topics.forget(topic.chatId, topicKey)
+      log(`send to topic "${topicKey}" failed (${r.error}) — using DMs`)
+    }
+  }
+  const all: Sent = { messages: [] }
+  for (const chatId of access.allowFrom) {
+    const r = await once(chatId)
+    all.messages.push(...r.messages)
+    if (r.error) all.error = r.error
+  }
+  if (access.allowFrom.length === 0) all.error = 'nobody to send to: no Telegram user is allowlisted'
+  return all
+}
+
+async function postPrompt(p: PromptBody): Promise<PromptResult> {
+  if (p.key) {
+    const known = prompts.byKey(p.key)
+    if (known) return { id: known.id, message_ids: known.messages.map(m => m.messageId) }
+  }
+  if (typeof p.text !== 'string' || !p.text.trim()) return { error: 'text required' }
+  let rows: string[][] | undefined
+  try {
+    rows = parseAskButtons(p.buttons)
+    buildKeyboard(rows)
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
+  const labels = new Set((rows ?? []).flat().map(l => l.trim()))
+  const needsText = (p.needs_text ?? []).filter(l => labels.has(l.trim()))
+
+  // Files first, so the buttons end up at the bottom, right under the text.
+  const sent: PromptMessage[] = []
+  if (p.files?.length) {
+    const f = await sendTo(p.topic, { text: '', files: p.files })
+    if (f.error && f.messages.length === 0) return { error: f.error }
+    sent.push(...f.messages)
+  }
+  const t = await sendTo(p.topic, { text: p.text, format: p.format, ...(rows ? { buttons: rows } : {}) })
+  if (t.messages.length === 0) return { error: t.error ?? 'could not post the prompt' }
+  // The last message per chat carries the buttons.
+  const last = new Map<string, PromptMessage>()
+  for (const m of t.messages) last.set(m.chatId, m)
+  for (const m of last.values()) if (rows) m.buttons = true
+  sent.push(...t.messages)
+
+  const prompt = prompts.add({ key: p.key, topic: p.topic, needsText, messages: sent })
+  log(`prompt ${prompt.id}${p.key ? ` (${p.key})` : ''} posted`)
+  return { id: prompt.id, message_ids: sent.map(m => m.messageId) }
+}
+
+async function dropButtons(p: Prompt): Promise<void> {
+  await Promise.all(p.messages.filter(m => m.buttons).map(m =>
+    bot.api.editMessageReplyMarkup(m.chatId, m.messageId, { reply_markup: { inline_keyboard: [] } }).catch(() => {}),
+  ))
+}
+
+function senderLabel(meta: Record<string, string>): string {
+  return meta.user ? (/^\d+$/.test(meta.user) ? meta.user_name || meta.user : `@${meta.user}`) : 'owner'
+}
+
+/**
+ * Is this inbound message an answer to a gate prompt? A tap on its buttons,
+ * a reply to it, or — after a needs-text button — the next message in that
+ * chat/topic. Allowlisted users only. Returns true when consumed.
+ */
+async function answerPrompt(n: ChannelNotification): Promise<boolean> {
+  const meta = n.meta
+  if (meta.edited || !meta.user_id || !store.load().allowFrom.includes(meta.user_id)) return false
+  const chatId = meta.chat_id!
+  const thread = meta.thread_id != null ? Number(meta.thread_id) : undefined
+  const ref = meta.button_message_id ?? meta.reply_to_message_id
+  const by = senderLabel(meta)
+
+  let p = ref != null ? prompts.byMessage(chatId, Number(ref)) : undefined
+  if (!p) {
+    if (meta.button_message_id != null) return false
+    const waiting = prompts.awaitingIn(chatId, thread)
+    if (waiting.length !== 1) return false // none, or ambiguous: a reply picks one
+    p = waiting[0]!
+  }
+  if (p.state === 'answered') {
+    await bot.api.sendMessage(chatId, 'That was already answered.', { message_thread_id: thread }).catch(() => {})
+    return true
+  }
+
+  if (meta.button_choice) {
+    const label = n.content
+    if (p.needsText.includes(label)) {
+      prompts.awaitText(p.id, label)
+      const hint = await bot.api.sendMessage(chatId, `✍️ ${label}: type your notes here (or reply to this message).`,
+        { message_thread_id: thread }).catch(() => undefined)
+      if (hint) prompts.addMessages(p.id, [{ chatId, messageId: hint.message_id, ...(thread != null ? { threadId: thread } : {}) }])
+      return true
+    }
+    return finishPrompt(p, { label, by, at: Date.now() })
+  }
+  if (meta.attachment_kind || meta.image_path) {
+    await bot.api.sendMessage(chatId, 'Please answer with text.', { message_thread_id: thread }).catch(() => {})
+    return true
+  }
+  const label = p.state === 'awaiting_text' ? p.pendingLabel : undefined
+  void react(chatId, Number(meta.message_id), '👍')
+  return finishPrompt(p, { ...(label ? { label } : {}), text: n.content, by, at: Date.now() })
+}
+
+async function finishPrompt(p: Prompt, answer: { label?: string; text?: string; by: string; at: number }): Promise<boolean> {
+  if (!prompts.answer(p.id, answer)) return true
+  log(`prompt ${p.id} answered by ${answer.by}`)
+  await dropButtons(p)
+  const updated = prompts.get(p.id)!
+  // Not connected: kept in prompts.json and sent when the orchestrator reconnects.
+  toOrchestrator(answerEvent(updated))
+  return true
+}
+
+/** Where the control topic is, if a topics group is set and the topic exists. */
+function controlThread(access: Access = store.load()): { group: string; threadId: number; key: string } | undefined {
+  const group = topicsGroupId(access)
+  if (!group) return undefined
+  const key = controlTopic(access)
+  const threadId = topics.get(group, key)
+  return threadId != null ? { group, threadId, key } : undefined
+}
+
+/**
+ * Plain messages in the control topic belong to the orchestrator — never to
+ * sessions, ask_owner or the inbox. (Answers to its own prompts there were
+ * already taken by answerPrompt.) Returns true when it's that topic.
+ */
+async function toControlTopic(n: ChannelNotification): Promise<boolean> {
+  const meta = n.meta
+  const ctl = controlThread()
+  if (!ctl || meta.chat_id !== ctl.group || Number(meta.thread_id) !== ctl.threadId) return false
+  if (meta.edited || !meta.user_id || !store.load().allowFrom.includes(meta.user_id)) return true
+  const say = (text: string) => bot.api.sendMessage(ctl.group, text, { message_thread_id: ctl.threadId }).catch(() => {})
+  if (meta.attachment_kind || meta.image_path) {
+    await say("Attachments aren't supported here. Send text.")
+    return true
+  }
+  const replyTo = meta.reply_to_message_id != null ? Number(meta.reply_to_message_id) : undefined
+  const delivered = toOrchestrator({
+    type: 'message',
+    text: n.content,
+    topic: ctl.key,
+    chat_id: ctl.group,
+    thread_id: ctl.threadId,
+    message_id: Number(meta.message_id),
+    user_id: meta.user_id,
+    user: senderLabel(meta),
+    ts: meta.ts ?? new Date().toISOString(),
+    // In a forum every message "replies" to the topic's first message; that one isn't a real reply.
+    ...(replyTo != null && replyTo !== ctl.threadId ? { reply_to_message_id: replyTo } : {}),
+  })
+  if (!delivered) await say('Orchestrator is not running.')
+  else void react(ctl.group, Number(meta.message_id), '👀')
+  return true
+}
+
+/** Bot commands for the orchestrator. Allowlisted senders, DMs or the topics group only. */
+async function handleOrchestratorCommand(ctx: Context, command: OrchestratorCommand): Promise<void> {
+  const msg = ctx.message
+  if (!msg || !ctx.from || !ctx.chat) return
+  const access = store.load()
+  const senderId = String(ctx.from.id)
+  if (!access.allowFrom.includes(senderId) || access.dmPolicy === 'disabled') return
+  const chatId = String(ctx.chat.id)
+  const group = topicsGroupId(access)
+  if (ctx.chat.type !== 'private' && chatId !== group) return
+  const thread = msg.is_topic_message ? msg.message_thread_id : undefined
+  const threadTopic = group && chatId === group && thread != null ? topics.nameFor(group, thread) : undefined
+  const control = isControlTopic(access, threadTopic)
+  const topic = control ? undefined : threadTopic
+  const say = (text: string) => ctx.reply(text, thread != null ? { message_thread_id: thread } : {}).catch(() => {})
+  const args = typeof ctx.match === 'string' ? ctx.match.trim() : ''
+
+  if (command === 'task' && !topic && !control) return void say('Send /task in a project\'s topic, or write "project: request" in the orchestrator topic.')
+  if (command === 'task' && !args) return void say('Usage: /task <what to build or fix>')
+  if (command === 'setup' && topic) return void say('Send /setup in the General topic or a DM.')
+
+  const delivered = toOrchestrator({
+    type: 'command',
+    command,
+    args,
+    ...(topic ? { topic } : {}),
+    ...(control ? { control: true as const } : {}),
+    chat_id: chatId,
+    ...(thread != null ? { thread_id: thread } : {}),
+    message_id: msg.message_id,
+    user_id: senderId,
+    user: ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name,
+    ts: new Date(msg.date * 1000).toISOString(),
+  })
+  if (!delivered) return void say('Orchestrator is not running.')
+  void react(chatId, msg.message_id, '👀')
+}
+
+for (const command of ORCHESTRATOR_COMMANDS) {
+  bot.command(command, ctx => handleOrchestratorCommand(ctx, command))
+}
+
 // --- routing inbound messages ---------------------------------------------
 
 const held = new Map<string, ChannelNotification[]>()
@@ -333,7 +680,10 @@ function sessionKeyboard(chatId: string, prefix = 'use'): InlineKeyboard {
 
 async function deliver(n: ChannelNotification): Promise<boolean> {
   touch()
-  if (await answerQuestion(n)) return false // consumed; stops the typing indicator
+  if (await answerPrompt(n)) return false // consumed; stops the typing indicator
+  if (await toControlTopic(n)) return false
+  if (await answerQuestion(n)) return false
+  if (await queueForInbox(n)) return false
   const chatId = n.meta.chat_id!
   const replyTo = n.meta.reply_to_message_id ?? n.meta.button_message_id
   const group = topicsGroupId()
@@ -450,7 +800,7 @@ registerInbound({
   deliver,
   // A question's buttons answer it, so only allowlisted users may tap them.
   tapAllowed: (chatId, messageId, senderId) =>
-    !questions.byMessage(chatId, messageId) || store.load().allowFrom.includes(senderId),
+    !(questions.byMessage(chatId, messageId) || prompts.byMessage(chatId, messageId)) || store.load().allowFrom.includes(senderId),
   log,
 })
 
@@ -474,7 +824,14 @@ async function handle(req: Request): Promise<Response> {
     return json({ ok: true, pid: process.pid, sessions: router.size })
   }
   if (req.method === 'GET' && pathname === '/status') {
-    return json({ sessions: router.list(), pendingApprovals: hookRequests.size, openQuestions: questions.openCount })
+    return json({
+      sessions: router.list(),
+      inboxSessions: [...inboxSessions.values()].map(s => ({ name: s.name, topic: s.topic, cwd: s.cwd, queued: s.queue.length })),
+      pendingApprovals: hookRequests.size,
+      openQuestions: questions.openCount,
+      orchestrator: streams.has(ORCHESTRATOR_STREAM),
+      openPrompts: prompts.openCount,
+    })
   }
   if (req.method !== 'POST') return json({ error: 'not found' }, 404)
 
@@ -496,7 +853,8 @@ async function handle(req: Request): Promise<Response> {
             if (!push(id, { type: 'ping' })) clearInterval(ping)
           }, 20_000)
           log(`session connected: ${info.name} (${cwd})`)
-          void topicFor(info.name).then(t => { if (t) sessionTopics.set(id, t.threadId) })
+          if (isControlTopic(store.load(), info.name)) log(`"${info.name}" is the orchestrator's control topic — this session gets no topic`)
+          else void topicFor(info.name).then(t => { if (t) sessionTopics.set(id, t.threadId) })
         },
         cancel() {
           clearInterval(ping)
@@ -513,6 +871,15 @@ async function handle(req: Request): Promise<Response> {
 
     case '/tool': {
       const { session, name, args } = body as ToolCallBody
+      const inbox = inboxSessions.get(session)
+      if (inbox) {
+        // Inbox sessions send through the hub so replies to their messages find them.
+        const result = await callTool(toolDeps, name, args ?? {})
+        if (result.sentIds?.length && typeof args?.chat_id === 'string') {
+          recordInboxOwner(result.sentIds.map(messageId => ({ chatId: args.chat_id as string, messageId })), session)
+        }
+        return json(result)
+      }
       const info = router.get(session)
       if (!info) return json({ content: [{ type: 'text', text: `${name} failed: session not connected to the hub` }], isError: true })
       const a = { ...(args ?? {}) }
@@ -582,6 +949,107 @@ async function handle(req: Request): Promise<Response> {
         void relay.cancel(id, '✔︎ Answered in the terminal')
       }
       return json({ ok: true })
+    }
+
+    case '/inbox/connect': {
+      const p = body as InboxConnectBody
+      if (!p.id || !p.topic) return json({ error: 'id and topic required' }, 400)
+      const reserved = isControlTopic(store.load(), p.topic)
+      if (reserved) log(`inbox session ${p.name} asked for the control topic "${p.topic}" — it gets no topic`)
+      const s: InboxSession = { ...p, topic: reserved ? '' : p.topic, queue: inboxSessions.get(p.id)?.queue ?? [] }
+      let ping: ReturnType<typeof setInterval>
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          try { streams.get(`inbox:${p.id}`)?.close() } catch {}
+          streams.set(`inbox:${p.id}`, controller)
+          inboxSessions.set(p.id, s)
+          push(`inbox:${p.id}`, { type: 'hello', name: p.name })
+          ping = setInterval(() => {
+            if (!push(`inbox:${p.id}`, { type: 'ping' })) clearInterval(ping)
+          }, 20_000)
+          log(`inbox session connected: ${p.name} (topic ${s.topic || 'none'})`)
+          if (s.topic) void topicFor(s.topic) // so the owner has somewhere to write
+        },
+        cancel() {
+          clearInterval(ping)
+          if (inboxSessions.get(p.id) !== s) return // replaced by a reconnect
+          streams.delete(`inbox:${p.id}`)
+          inboxSessions.delete(p.id)
+          log(`inbox session disconnected: ${p.name}`)
+          void closeInbox(s)
+        },
+      })
+      return new Response(stream, { headers: { 'Content-Type': 'application/x-ndjson' } })
+    }
+
+    case '/inbox/take': {
+      const { session_id } = body as InboxTakeBody
+      return json({ messages: takeInbox(session_id).map(m => ({ text: m.text, by: m.by })) } satisfies InboxTakeResult)
+    }
+
+    case '/orchestrator/connect': {
+      let ping: ReturnType<typeof setInterval>
+      let mine: ReadableStreamDefaultController<Uint8Array>
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          mine = controller
+          try { streams.get(ORCHESTRATOR_STREAM)?.close() } catch {} // one orchestrator: the newest wins
+          streams.set(ORCHESTRATOR_STREAM, controller)
+          toOrchestrator({ type: 'hello', name: 'orchestrator' })
+          for (const p of prompts.answered()) toOrchestrator(answerEvent(p)) // answered while it was away
+          ping = setInterval(() => {
+            if (!toOrchestrator({ type: 'ping' })) clearInterval(ping)
+          }, 20_000)
+          log('orchestrator connected')
+          if (topicsGroupId()) void topicFor(controlTopic(store.load())) // its control topic
+        },
+        cancel() {
+          clearInterval(ping)
+          if (streams.get(ORCHESTRATOR_STREAM) !== mine) return
+          streams.delete(ORCHESTRATOR_STREAM)
+          log('orchestrator disconnected')
+        },
+      })
+      return new Response(stream, { headers: { 'Content-Type': 'application/x-ndjson' } })
+    }
+
+    case '/prompt':
+      return json(await postPrompt(body as PromptBody))
+
+    case '/prompt/ack': {
+      const { id } = body as { id: string }
+      return json({ ok: !!prompts.remove(id) })
+    }
+
+    case '/prompt/cancel': {
+      const { id, note } = body as { id: string; note?: string }
+      const p = prompts.remove(id)
+      if (!p) return json({ ok: false })
+      await dropButtons(p)
+      const anchor = p.messages.filter(m => m.buttons).length ? p.messages.filter(m => m.buttons) : p.messages.slice(-1)
+      await Promise.all(anchor.map(m => bot.api.sendMessage(m.chatId, `✖️ ${note?.trim() || 'Withdrawn'}`, {
+        message_thread_id: m.threadId,
+        reply_parameters: { message_id: m.messageId, allow_sending_without_reply: true },
+      }).catch(() => {})))
+      log(`prompt ${id} cancelled`)
+      return json({ ok: true })
+    }
+
+    case '/notice': {
+      const p = body as NoticeBody
+      if (!p.text?.trim() && !p.files?.length) return json({ error: 'text or files required' } satisfies NoticeResult)
+      const r = await sendTo(p.topic, { text: p.text ?? '', files: p.files ?? [], format: p.format })
+      if (r.messages.length === 0) return json({ error: r.error ?? 'could not send' } satisfies NoticeResult)
+      return json({ message_ids: r.messages.map(m => m.messageId) } satisfies NoticeResult)
+    }
+
+    case '/topic/ensure': {
+      const { topic } = body as { topic?: string }
+      if (!topic?.trim()) return json({ error: 'topic required' } satisfies TopicResult)
+      if (!topicsGroupId()) return json({ error: 'no topics group configured (/telegram-plus:access set topicsGroup)' } satisfies TopicResult)
+      topicFailures.delete(topic)
+      const t = await topicFor(topic.trim())
+      return json((t ? { chat_id: t.chatId, thread_id: t.threadId } : { error: 'could not create the topic (see hub.log)' }) satisfies TopicResult)
     }
 
     case '/ask': {
@@ -654,6 +1122,11 @@ const pruneQuestions = () => {
   for (const q of questions.prune()) void closeQuestion(q, '⌛ Expired — nobody is waiting for this answer anymore')
 }
 pruneQuestions()
+const prunePrompts = () => {
+  for (const p of prompts.prune()) void dropButtons(p)
+}
+prunePrompts()
+setInterval(prunePrompts, 60 * 60 * 1000).unref()
 setInterval(pruneQuestions, 60 * 60 * 1000).unref()
 const sweepInbox = () => {
   const n = cleanInbox(INBOX_DIR, INBOX_MAX_AGE_MS)
@@ -682,7 +1155,7 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 
 setInterval(() => {
   // Open questions keep the hub polling: their answer can come any time.
-  if (streams.size === 0 && hookRequests.size === 0 && questions.openCount === 0 && Date.now() - lastActivity > HUB_IDLE_MS) {
+  if (streams.size === 0 && hookRequests.size === 0 && questions.openCount === 0 && prompts.openCount === 0 && Date.now() - lastActivity > HUB_IDLE_MS) {
     shutdown(`idle for ${Math.round(HUB_IDLE_MS / 60000)}m with no sessions`)
   }
 }, Math.min(60_000, HUB_IDLE_MS)).unref()
@@ -702,11 +1175,25 @@ void (async () => {
             [
               { command: 'sessions', description: 'List connected Claude Code sessions' },
               { command: 'use', description: 'Send messages to a session: /use <name>' },
+              { command: 'queue', description: "Show the orchestrator's task queue" },
+              { command: 'level', description: 'Set the autonomy level: /level <0|1|2>' },
+              { command: 'cancel', description: 'Cancel a task: /cancel <id>' },
+              { command: 'setup', description: 'Set up a project: /setup <name> <repo-url>' },
               { command: 'status', description: 'Check your pairing status' },
               { command: 'help', description: 'What this bot can do' },
               { command: 'start', description: 'Welcome and setup guide' },
             ],
             { scope: { type: 'all_private_chats' } },
+          ).catch(() => {})
+          void bot.api.setMyCommands(
+            [
+              { command: 'task', description: 'New task for this project: /task <request>' },
+              { command: 'queue', description: "Show the orchestrator's task queue" },
+              { command: 'level', description: 'Set the autonomy level: /level <0|1|2>' },
+              { command: 'cancel', description: 'Cancel a task: /cancel <id>' },
+              { command: 'setup', description: 'Set up a project: /setup <name> <repo-url>' },
+            ],
+            { scope: { type: 'all_group_chats' } },
           ).catch(() => {})
         },
       })

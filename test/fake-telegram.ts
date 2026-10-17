@@ -33,6 +33,11 @@ export class FakeTelegram {
           this.tap(b.user, b.data, b.messageId)
           return Response.json({ ok: true })
         }
+        if (url.pathname === '/_ctl/group') {
+          const b = await req.json() as { user: number; chat: number; text: string; thread?: number; replyTo?: number }
+          this.groupMsg(b.user, b.chat, b.text, b.thread, b.replyTo)
+          return Response.json({ ok: true })
+        }
         if (url.pathname === '/_ctl/calls') return Response.json(this.calls)
         const method = url.pathname.split('/').pop()!
         const text = await req.text()
@@ -68,6 +73,9 @@ export class FakeTelegram {
         return { id: 1, is_bot: true, first_name: 'Bot', username: 'test_bot' }
       case 'createForumTopic':
         return { message_thread_id: this.nextThreadId++, name: params.name, icon_color: 0 }
+      case 'sendDocument':
+      case 'sendPhoto':
+        return { message_id: this.nextMessageId++, date: Math.floor(Date.now() / 1000), chat: { id: Number(params.chat_id), type: 'private' } }
       case 'sendMessage':
         return {
           message_id: this.nextMessageId++,
@@ -105,7 +113,28 @@ export class FakeTelegram {
   }
 
   /** A message from `userId` in group `chatId`, optionally inside forum topic `threadId` and replying to `replyTo`. */
-  groupMsg(userId: number, chatId: number, text: string, threadId?: number, replyTo?: number): void {
+  groupMsg(userId: number, chatId: number, text: string, threadId?: number, replyTo?: number): number {
+    const messageId = this.nextMessageId++
+    this.updates.push({
+      update_id: this.nextUpdateId++,
+      message: {
+        message_id: messageId,
+        date: Math.floor(Date.now() / 1000),
+        chat: { id: chatId, type: 'supergroup', title: 'Claude', is_forum: true },
+        from: { id: userId, is_bot: false, first_name: 'User', username: `user${userId}` },
+        text,
+        ...(text.startsWith('/') ? { entities: [{ type: 'bot_command', offset: 0, length: text.split(' ')[0]!.length }] } : {}),
+        ...(threadId != null ? { message_thread_id: threadId, is_topic_message: true } : {}),
+        ...(replyTo != null
+          ? { reply_to_message: { message_id: replyTo, date: 0, chat: { id: chatId, type: 'supergroup' }, from: { id: 1, is_bot: true, first_name: 'Bot', username: 'test_bot' }, text: '…' } }
+          : {}),
+      },
+    })
+    return messageId
+  }
+
+  /** A document with a caption from `userId` in forum topic `threadId`. */
+  groupDocument(userId: number, chatId: number, caption: string, threadId: number): void {
     this.updates.push({
       update_id: this.nextUpdateId++,
       message: {
@@ -113,11 +142,10 @@ export class FakeTelegram {
         date: Math.floor(Date.now() / 1000),
         chat: { id: chatId, type: 'supergroup', title: 'Claude', is_forum: true },
         from: { id: userId, is_bot: false, first_name: 'User', username: `user${userId}` },
-        text,
-        ...(threadId != null ? { message_thread_id: threadId, is_topic_message: true } : {}),
-        ...(replyTo != null
-          ? { reply_to_message: { message_id: replyTo, date: 0, chat: { id: chatId, type: 'supergroup' }, from: { id: 1, is_bot: true, first_name: 'Bot', username: 'test_bot' }, text: '…' } }
-          : {}),
+        caption,
+        document: { file_id: 'doc-1', file_unique_id: 'u1', file_name: 'spec.pdf', mime_type: 'application/pdf', file_size: 10 },
+        message_thread_id: threadId,
+        is_topic_message: true,
       },
     })
   }

@@ -115,6 +115,28 @@ Any session with the plugin enabled, including one not started with the launcher
 /telegram-plus:access set askTimeoutMinutes 60
 ```
 
+## Messaging a running agent (inbox)
+
+A session that isn't a channel session can't receive Telegram messages. With `TELEGRAM_PLUS_INBOX=1` in its environment it gets an inbox instead. Owner messages are queued in the hub and handed to the model by the plugin's hooks:
+
+- **After the current tool call** (`PostToolUse`, as `additionalContext`), or
+- **when the turn ends** (`Stop`, which blocks the stop with the message as the reason, so the agent keeps going; the terminal shows this as "Stop hook error", which is cosmetic).
+
+Nothing can interrupt a running tool call. For a hard stop, kill the session.
+
+What reaches the inbox, from allowlisted users only:
+
+- A reply to (or tap on) one of the session's messages: its `ask_owner` questions and anything it sent with `reply`.
+- Any message in its project topic (`TELEGRAM_PLUS_TOPIC`, else the folder) when it's the only inbox session there. With several, a plain message gets a "reply to a message from the one you mean" hint.
+- A plain message still answers the single open `ask_owner` question in that topic first.
+- Text only. Attachments get "Attachments aren't supported for agents."
+
+The model sees `Message from the owner on Telegram (@you):\n<text>`, or for several at once `N messages from the owner on Telegram (@you), oldest first:\n[1] …\n[2] …`.
+
+Feedback in Telegram: 👀 when queued, 👍 when delivered to the agent. If the session ends with messages still queued, the bot replies to them saying they weren't delivered. The queue lives in the hub's memory, so a hub restart drops it.
+
+The hooks run after every tool call in every session, but without `TELEGRAM_PLUS_INBOX` they exit in the shell before starting anything. With it, they make one local socket call and never start the hub.
+
 ## Choice buttons
 
 Claude can attach inline buttons to a reply instead of asking the user to type:
@@ -157,7 +179,31 @@ The channel session itself is skipped, since there Claude already talks to you o
 
 In `-p` (headless) runs Claude Code cancels async hooks at teardown, so a "finished" notice may not arrive.
 
-## Access control
+## Orchestrator API
+
+A separate long-running process on the same machine (an orchestrator that runs Claude Code sessions for tasks) can use the hub too: [`src/hub/orchestrator.ts`](src/hub/orchestrator.ts) has the wire types and a small `OrchestratorClient`. It uses the same transport as everything else: HTTP over the hub's 0700 unix socket.
+
+**Control topic.** When the orchestrator connects (with a topics group set), the hub creates a `🎛 Orchestrator` topic. Its key is `orchestratorTopic` in access, default `Orchestrator`. Every allowlisted plain message there goes to the orchestrator as a `message` event, never to a session, `ask_owner` or an inbox. The exception is answers to the orchestrator's own prompts there, which still arrive as `prompt_answer`. The bot reacts 👀. Attachments get "not supported", and with no orchestrator connected the bot replies "Orchestrator is not running." No session can use this key as its project topic: its questions, approvals and notices go to DMs instead.
+
+**Commands in.** `/task <request>` (in a project topic), and `/queue`, `/cancel <id>`, `/level <0|1|2>` (topic or DM), `/setup <name> <repo-url>` (General topic, control topic or DM). Commands sent in the control topic carry `control: true` and no `topic`. These go to the orchestrator as `command` events, never to a session, and the bot reacts 👀. Only allowlisted senders, in DMs or the topics group. With no orchestrator connected the bot replies "Orchestrator is not running." Plain messages keep the routing above.
+
+| Endpoint | Body | Returns |
+| --- | --- | --- |
+| `POST /orchestrator/connect` | `{}` | NDJSON stream: `hello`, `ping`, `command`, `message`, `prompt_answer`. One orchestrator at a time: the newest connection wins. |
+| `POST /prompt` | `{ key?, topic?, text, buttons?, needs_text?, files?, format? }` | `{ id, message_ids }` or `{ error }` |
+| `POST /prompt/ack` | `{ id }` | `{ ok }`: stop re-sending that answer |
+| `POST /prompt/cancel` | `{ id, note? }` | `{ ok }`: buttons removed, `✖️ note` posted under it |
+| `POST /notice` | `{ topic?, text?, files?, format? }` | `{ message_ids }` or `{ error }` |
+| `POST /topic/ensure` | `{ topic }` | `{ chat_id, thread_id }` or `{ error }` |
+
+`topic` is a project key (as in `topics.json`). Without one, or when the topic can't be used, messages go to allowlisted DMs.
+
+Gate prompts:
+
+- Files are sent first and the text with the buttons last. A tap answers with its `label`.
+- A `needs_text` button (e.g. `Revise`) asks the owner to type notes, and the answer carries both `label` and `text`. A typed reply to the prompt answers with `text` only.
+- Allowlisted users only.
+- Prompts are kept in `prompts.json`. Answers given while the orchestrator is disconnected are re-sent on every connect until acked. The same `key` never posts twice.
 
 See [ACCESS.md](./ACCESS.md).
 

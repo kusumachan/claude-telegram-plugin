@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'fs'
 import { parseAskButtons, QuestionStore } from '../src/ask.ts'
-import { sessionTopic } from '../src/topics.ts'
+import { controlTopic, isControlTopic, sessionTopic } from '../src/topics.ts'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync('/tmp/tgp-ask-') })
@@ -84,5 +84,15 @@ describe('sessionTopic', () => {
     expect(sessionTopic('/code/project-x/.claude/worktrees/fix', {})).toBe('project-x')
     expect(sessionTopic('/tmp/whatever', { TELEGRAM_PLUS_TOPIC: 'project-x' })).toBe('project-x')
     expect(sessionTopic('/code/api', { TELEGRAM_PLUS_TOPIC: '  ' })).toBe('api')
+  })
+})
+
+describe('control topic', () => {
+  test('defaults to "Orchestrator", configurable, matched case-insensitively', () => {
+    expect(controlTopic({})).toBe('Orchestrator')
+    expect(controlTopic({ orchestratorTopic: ' Control ' })).toBe('Control')
+    expect(isControlTopic({}, 'orchestrator')).toBe(true)
+    expect(isControlTopic({ orchestratorTopic: 'Control' }, 'Orchestrator')).toBe(false)
+    expect(isControlTopic({}, undefined)).toBe(false)
   })
 })

@@ -1,5 +1,5 @@
 {
-  "description": "Telegram notifications and approvals for Claude Code sessions",
+  "description": "Telegram notifications, approvals and owner messages for Claude Code sessions",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -33,6 +33,15 @@
             "async": true
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TELEGRAM_PLUS_INBOX\" ] || exit 0; bun \"${CLAUDE_PLUGIN_ROOT}/hooks/inbox.ts\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PermissionRequest": [
@@ -42,6 +51,17 @@
             "type": "command",
             "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/permission.ts\"",
             "timeout": 600
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TELEGRAM_PLUS_INBOX\" ] || exit 0; bun \"${CLAUDE_PLUGIN_ROOT}/hooks/inbox.ts\"",
+            "timeout": 10
           }
         ]
       }

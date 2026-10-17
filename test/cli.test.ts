@@ -69,6 +69,10 @@ describe('cli', () => {
     run(['set', 'askTimeoutMinutes', '60'], dir)
     expect(store().load().askTimeoutMinutes).toBe(60)
     expect(() => run(['set', 'askTimeoutMinutes', '0'], dir)).toThrow(/between 1 and 720/)
+    run(['set', 'orchestratorTopic', 'Control'], dir)
+    expect(store().load().orchestratorTopic).toBe('Control')
+    run(['set', 'orchestratorTopic', '""'], dir)
+    expect(store().load().orchestratorTopic).toBeUndefined()
   })
 
   test('status prints a summary', () => {

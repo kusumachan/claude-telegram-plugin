@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { withLockAsync } from './lock.ts'
+import type { Access } from './access.ts'
 import { projectLabel } from './notify.ts'
 
 /**
@@ -97,6 +98,18 @@ export const TOPIC_ENV = 'TELEGRAM_PLUS_TOPIC'
 /** The topic for a (non-channel) session: TELEGRAM_PLUS_TOPIC, else its project folder. */
 export function sessionTopic(cwd: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
   return env[TOPIC_ENV]?.trim() || topicName(projectLabel(cwd))
+}
+
+export const DEFAULT_ORCHESTRATOR_TOPIC = 'Orchestrator'
+
+/** The orchestrator control topic's key. */
+export function controlTopic(access: Pick<Access, 'orchestratorTopic'>): string {
+  return access.orchestratorTopic?.trim() || DEFAULT_ORCHESTRATOR_TOPIC
+}
+
+/** Sessions can't use the control topic as their project topic. */
+export function isControlTopic(access: Pick<Access, 'orchestratorTopic'>, name: string | undefined): boolean {
+  return !!name && name.trim().toLowerCase() === controlTopic(access).toLowerCase()
 }
 
 /** Telegram's error when posting to a topic that no longer exists. */

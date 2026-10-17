@@ -161,6 +161,12 @@ export function parseSetting(key: string, value: string): unknown {
       if (!Number.isInteger(n) || n < 10 || n > 540) throw new CliError(`${key} must be an integer between 10 and 540`)
       return n
     }
+    case 'orchestratorTopic': {
+      const v = value === '""' || value === "''" ? '' : value.trim()
+      if (!v) return undefined // back to the default
+      if (v.length > 64) throw new CliError('orchestratorTopic must be at most 64 characters')
+      return v
+    }
     case 'askTimeoutMinutes': {
       const n = Number(value)
       // Claude Code's own cap on a tool call is about 27h; stay well under it.
@@ -194,7 +200,7 @@ export function parseSetting(key: string, value: string): unknown {
     }
     default:
       throw new CliError(
-        `unknown key ${key}. Supported: ackReaction, replyToMode, chunkMode, textChunkLimit, maxPending, mentionPatterns, notify, notifyStopAfterSeconds, notifyPreview, approvals, approvalTimeoutSeconds, askTimeoutMinutes, topicsGroup`,
+        `unknown key ${key}. Supported: ackReaction, replyToMode, chunkMode, textChunkLimit, maxPending, mentionPatterns, notify, notifyStopAfterSeconds, notifyPreview, approvals, approvalTimeoutSeconds, askTimeoutMinutes, topicsGroup, orchestratorTopic`,
       )
   }
 }
@@ -215,7 +221,7 @@ function status(a: Access, now: number): string {
   for (const [id, g] of groups) {
     lines.push(`  ${id}  requireMention=${g.requireMention}  allowFrom=${g.allowFrom.join(',') || 'any'}`)
   }
-  const extras = (['ackReaction', 'replyToMode', 'chunkMode', 'textChunkLimit', 'maxPending', 'mentionPatterns', 'notify', 'notifyStopAfterSeconds', 'notifyPreview', 'approvals', 'approvalTimeoutSeconds', 'askTimeoutMinutes', 'topicsGroup'] as const)
+  const extras = (['ackReaction', 'replyToMode', 'chunkMode', 'textChunkLimit', 'maxPending', 'mentionPatterns', 'notify', 'notifyStopAfterSeconds', 'notifyPreview', 'approvals', 'approvalTimeoutSeconds', 'askTimeoutMinutes', 'topicsGroup', 'orchestratorTopic'] as const)
     .filter(k => a[k] !== undefined)
     .map(k => `${k}: ${JSON.stringify(a[k])}`)
   if (extras.length) lines.push(...extras)
