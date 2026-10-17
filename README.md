@@ -179,7 +179,29 @@ The channel session itself is skipped, since there Claude already talks to you o
 
 In `-p` (headless) runs Claude Code cancels async hooks at teardown, so a "finished" notice may not arrive.
 
-## Access control
+## Orchestrator API
+
+A separate long-running process on the same machine (an orchestrator that runs Claude Code sessions for tasks) can use the hub too: [`src/hub/orchestrator.ts`](src/hub/orchestrator.ts) has the wire types and a small `OrchestratorClient`. It uses the same transport as everything else: HTTP over the hub's 0700 unix socket.
+
+**Commands in.** `/task <request>` (in a project topic), and `/queue`, `/cancel <id>`, `/level <0|1|2>` (topic or DM), `/setup <name> <repo-url>` (General topic or DM). These go to the orchestrator as `command` events, never to a session, and the bot reacts 👀. Only allowlisted senders, in DMs or the topics group. With no orchestrator connected the bot replies "Orchestrator is not running." Plain messages keep the routing above.
+
+| Endpoint | Body | Returns |
+| --- | --- | --- |
+| `POST /orchestrator/connect` | `{}` | NDJSON stream: `hello`, `ping`, `command`, `prompt_answer`. One orchestrator at a time: the newest connection wins. |
+| `POST /prompt` | `{ key?, topic?, text, buttons?, needs_text?, files?, format? }` | `{ id, message_ids }` or `{ error }` |
+| `POST /prompt/ack` | `{ id }` | `{ ok }`: stop re-sending that answer |
+| `POST /prompt/cancel` | `{ id, note? }` | `{ ok }`: buttons removed, `✖️ note` posted under it |
+| `POST /notice` | `{ topic?, text?, files?, format? }` | `{ message_ids }` or `{ error }` |
+| `POST /topic/ensure` | `{ topic }` | `{ chat_id, thread_id }` or `{ error }` |
+
+`topic` is a project key (as in `topics.json`). Without one, or when the topic can't be used, messages go to allowlisted DMs.
+
+Gate prompts:
+
+- Files are sent first and the text with the buttons last. A tap answers with its `label`.
+- A `needs_text` button (e.g. `Revise`) asks the owner to type notes, and the answer carries both `label` and `text`. A typed reply to the prompt answers with `text` only.
+- Allowlisted users only.
+- Prompts are kept in `prompts.json`. Answers given while the orchestrator is disconnected are re-sent on every connect until acked. The same `key` never posts twice.
 
 See [ACCESS.md](./ACCESS.md).
 

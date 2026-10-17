@@ -10,6 +10,8 @@ export type Harness = {
   dir: string
   /** Connect a fake channel session; returns its event log and a disconnect fn. */
   connect(id: string, name: string, cwd?: string): { events: HubEvent[]; close(): void }
+  /** Connect as the orchestrator. */
+  connectOrchestrator(): { events: HubEvent[]; close(): void }
   /** Register an inbox session (what server.ts does with TELEGRAM_PLUS_INBOX=1). */
   connectInbox(id: string, name: string, topic: string): { events: HubEvent[]; close(): void }
   waitEvent(events: HubEvent[], pred: (e: HubEvent) => boolean, timeoutMs?: number): Promise<HubEvent>
@@ -43,6 +45,9 @@ export async function startHub(access: object, files: Record<string, string> = {
     dir,
     connect(id, name, cwd = `/code/${name}`) {
       return stream('/session/connect', { id, name, cwd })
+    },
+    connectOrchestrator() {
+      return stream('/orchestrator/connect', {})
     },
     connectInbox(id, name, topic) {
       return stream('/inbox/connect', { id, name, topic, cwd: `/code/${topic}` })

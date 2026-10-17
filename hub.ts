@@ -32,6 +32,17 @@ import {
 } from './src/ask.ts'
 import { buildKeyboard } from './src/buttons.ts'
 import { type InboxConnectBody, type InboxMessage, type InboxTakeBody, type InboxTakeResult } from './src/inbox.ts'
+import {
+  type NoticeBody,
+  type NoticeResult,
+  ORCHESTRATOR_COMMANDS,
+  type OrchestratorCommand,
+  type OrchestratorEvent,
+  type PromptBody,
+  type PromptResult,
+  type TopicResult,
+} from './src/hub/orchestrator.ts'
+import { type Prompt, type PromptMessage, PromptStore } from './src/prompts.ts'
 import { APPROVED_DIR, INBOX_DIR, INBOX_MAX_AGE_MS, loadEnvFile, STATE_DIR } from './src/config.ts'
 import { cleanInbox } from './src/files.ts'
 import { callbackAllowed, dmCommandAllowed } from './src/gate.ts'
@@ -415,6 +426,193 @@ async function closeInbox(s: InboxSession): Promise<void> {
   }
 }
 
+// --- orchestrator -------------------------------------------------------------------
+
+const ORCHESTRATOR_STREAM = 'orchestrator'
+const prompts = new PromptStore(STATE_DIR)
+
+/** Push to the connected orchestrator. False when it isn't connected. */
+function toOrchestrator(e: OrchestratorEvent): boolean {
+  return push(ORCHESTRATOR_STREAM, e as unknown as HubEvent)
+}
+
+function answerEvent(p: Prompt): OrchestratorEvent {
+  return { type: 'prompt_answer', id: p.id, ...(p.key ? { key: p.key } : {}), ...p.answer! }
+}
+
+type Sent = { messages: PromptMessage[]; error?: string }
+
+/**
+ * Send through the reply tool's code path (chunking, files, markup
+ * fallback) to a project topic, or to every allowlisted DM when there's no
+ * topic or it can't be used.
+ */
+async function sendTo(topicKey: string | undefined, args: Record<string, unknown>): Promise<Sent> {
+  const access = store.load()
+  const once = async (chatId: string, threadId?: number): Promise<Sent> => {
+    const r = await callTool(toolDeps, 'reply', { ...args, chat_id: chatId, ...(threadId != null ? { thread_id: String(threadId) } : {}) })
+    const messages = (r.sentIds ?? []).map(messageId => ({ chatId, messageId, ...(threadId != null ? { threadId } : {}) }))
+    return { messages, ...(r.isError ? { error: r.content[0]?.text ?? 'send failed' } : {}) }
+  }
+  if (topicKey) {
+    const topic = await topicFor(topicKey)
+    if (topic) {
+      const r = await once(topic.chatId, topic.threadId)
+      if (!r.error || r.messages.length) return r
+      if (isMissingTopic(r.error)) topics.forget(topic.chatId, topicKey)
+      log(`send to topic "${topicKey}" failed (${r.error}) — using DMs`)
+    }
+  }
+  const all: Sent = { messages: [] }
+  for (const chatId of access.allowFrom) {
+    const r = await once(chatId)
+    all.messages.push(...r.messages)
+    if (r.error) all.error = r.error
+  }
+  if (access.allowFrom.length === 0) all.error = 'nobody to send to: no Telegram user is allowlisted'
+  return all
+}
+
+async function postPrompt(p: PromptBody): Promise<PromptResult> {
+  if (p.key) {
+    const known = prompts.byKey(p.key)
+    if (known) return { id: known.id, message_ids: known.messages.map(m => m.messageId) }
+  }
+  if (typeof p.text !== 'string' || !p.text.trim()) return { error: 'text required' }
+  let rows: string[][] | undefined
+  try {
+    rows = parseAskButtons(p.buttons)
+    buildKeyboard(rows)
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
+  const labels = new Set((rows ?? []).flat().map(l => l.trim()))
+  const needsText = (p.needs_text ?? []).filter(l => labels.has(l.trim()))
+
+  // Files first, so the buttons end up at the bottom, right under the text.
+  const sent: PromptMessage[] = []
+  if (p.files?.length) {
+    const f = await sendTo(p.topic, { text: '', files: p.files })
+    if (f.error && f.messages.length === 0) return { error: f.error }
+    sent.push(...f.messages)
+  }
+  const t = await sendTo(p.topic, { text: p.text, format: p.format, ...(rows ? { buttons: rows } : {}) })
+  if (t.messages.length === 0) return { error: t.error ?? 'could not post the prompt' }
+  // The last message per chat carries the buttons.
+  const last = new Map<string, PromptMessage>()
+  for (const m of t.messages) last.set(m.chatId, m)
+  for (const m of last.values()) if (rows) m.buttons = true
+  sent.push(...t.messages)
+
+  const prompt = prompts.add({ key: p.key, topic: p.topic, needsText, messages: sent })
+  log(`prompt ${prompt.id}${p.key ? ` (${p.key})` : ''} posted`)
+  return { id: prompt.id, message_ids: sent.map(m => m.messageId) }
+}
+
+async function dropButtons(p: Prompt): Promise<void> {
+  await Promise.all(p.messages.filter(m => m.buttons).map(m =>
+    bot.api.editMessageReplyMarkup(m.chatId, m.messageId, { reply_markup: { inline_keyboard: [] } }).catch(() => {}),
+  ))
+}
+
+function senderLabel(meta: Record<string, string>): string {
+  return meta.user ? (/^\d+$/.test(meta.user) ? meta.user_name || meta.user : `@${meta.user}`) : 'owner'
+}
+
+/**
+ * Is this inbound message an answer to a gate prompt? A tap on its buttons,
+ * a reply to it, or — after a needs-text button — the next message in that
+ * chat/topic. Allowlisted users only. Returns true when consumed.
+ */
+async function answerPrompt(n: ChannelNotification): Promise<boolean> {
+  const meta = n.meta
+  if (meta.edited || !meta.user_id || !store.load().allowFrom.includes(meta.user_id)) return false
+  const chatId = meta.chat_id!
+  const thread = meta.thread_id != null ? Number(meta.thread_id) : undefined
+  const ref = meta.button_message_id ?? meta.reply_to_message_id
+  const by = senderLabel(meta)
+
+  let p = ref != null ? prompts.byMessage(chatId, Number(ref)) : undefined
+  if (!p) {
+    if (meta.button_message_id != null) return false
+    const waiting = prompts.awaitingIn(chatId, thread)
+    if (waiting.length !== 1) return false // none, or ambiguous: a reply picks one
+    p = waiting[0]!
+  }
+  if (p.state === 'answered') {
+    await bot.api.sendMessage(chatId, 'That was already answered.', { message_thread_id: thread }).catch(() => {})
+    return true
+  }
+
+  if (meta.button_choice) {
+    const label = n.content
+    if (p.needsText.includes(label)) {
+      prompts.awaitText(p.id, label)
+      const hint = await bot.api.sendMessage(chatId, `✍️ ${label}: type your notes here (or reply to this message).`,
+        { message_thread_id: thread }).catch(() => undefined)
+      if (hint) prompts.addMessages(p.id, [{ chatId, messageId: hint.message_id, ...(thread != null ? { threadId: thread } : {}) }])
+      return true
+    }
+    return finishPrompt(p, { label, by, at: Date.now() })
+  }
+  if (meta.attachment_kind || meta.image_path) {
+    await bot.api.sendMessage(chatId, 'Please answer with text.', { message_thread_id: thread }).catch(() => {})
+    return true
+  }
+  const label = p.state === 'awaiting_text' ? p.pendingLabel : undefined
+  void react(chatId, Number(meta.message_id), '👍')
+  return finishPrompt(p, { ...(label ? { label } : {}), text: n.content, by, at: Date.now() })
+}
+
+async function finishPrompt(p: Prompt, answer: { label?: string; text?: string; by: string; at: number }): Promise<boolean> {
+  if (!prompts.answer(p.id, answer)) return true
+  log(`prompt ${p.id} answered by ${answer.by}`)
+  await dropButtons(p)
+  const updated = prompts.get(p.id)!
+  // Not connected: kept in prompts.json and sent when the orchestrator reconnects.
+  toOrchestrator(answerEvent(updated))
+  return true
+}
+
+/** Bot commands for the orchestrator. Allowlisted senders, DMs or the topics group only. */
+async function handleOrchestratorCommand(ctx: Context, command: OrchestratorCommand): Promise<void> {
+  const msg = ctx.message
+  if (!msg || !ctx.from || !ctx.chat) return
+  const access = store.load()
+  const senderId = String(ctx.from.id)
+  if (!access.allowFrom.includes(senderId) || access.dmPolicy === 'disabled') return
+  const chatId = String(ctx.chat.id)
+  const group = topicsGroupId(access)
+  if (ctx.chat.type !== 'private' && chatId !== group) return
+  const thread = msg.is_topic_message ? msg.message_thread_id : undefined
+  const topic = group && chatId === group && thread != null ? topics.nameFor(group, thread) : undefined
+  const say = (text: string) => ctx.reply(text, thread != null ? { message_thread_id: thread } : {}).catch(() => {})
+  const args = typeof ctx.match === 'string' ? ctx.match.trim() : ''
+
+  if (command === 'task' && !topic) return void say("Send /task in a project's topic.")
+  if (command === 'task' && !args) return void say('Usage: /task <what to build or fix>')
+  if (command === 'setup' && topic) return void say('Send /setup in the General topic or a DM.')
+
+  const delivered = toOrchestrator({
+    type: 'command',
+    command,
+    args,
+    ...(topic ? { topic } : {}),
+    chat_id: chatId,
+    ...(thread != null ? { thread_id: thread } : {}),
+    message_id: msg.message_id,
+    user_id: senderId,
+    user: ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name,
+    ts: new Date(msg.date * 1000).toISOString(),
+  })
+  if (!delivered) return void say('Orchestrator is not running.')
+  void react(chatId, msg.message_id, '👀')
+}
+
+for (const command of ORCHESTRATOR_COMMANDS) {
+  bot.command(command, ctx => handleOrchestratorCommand(ctx, command))
+}
+
 // --- routing inbound messages ---------------------------------------------
 
 const held = new Map<string, ChannelNotification[]>()
@@ -432,7 +630,8 @@ function sessionKeyboard(chatId: string, prefix = 'use'): InlineKeyboard {
 
 async function deliver(n: ChannelNotification): Promise<boolean> {
   touch()
-  if (await answerQuestion(n)) return false // consumed; stops the typing indicator
+  if (await answerPrompt(n)) return false // consumed; stops the typing indicator
+  if (await answerQuestion(n)) return false
   if (await queueForInbox(n)) return false
   const chatId = n.meta.chat_id!
   const replyTo = n.meta.reply_to_message_id ?? n.meta.button_message_id
@@ -550,7 +749,7 @@ registerInbound({
   deliver,
   // A question's buttons answer it, so only allowlisted users may tap them.
   tapAllowed: (chatId, messageId, senderId) =>
-    !questions.byMessage(chatId, messageId) || store.load().allowFrom.includes(senderId),
+    !(questions.byMessage(chatId, messageId) || prompts.byMessage(chatId, messageId)) || store.load().allowFrom.includes(senderId),
   log,
 })
 
@@ -579,6 +778,8 @@ async function handle(req: Request): Promise<Response> {
       inboxSessions: [...inboxSessions.values()].map(s => ({ name: s.name, topic: s.topic, cwd: s.cwd, queued: s.queue.length })),
       pendingApprovals: hookRequests.size,
       openQuestions: questions.openCount,
+      orchestrator: streams.has(ORCHESTRATOR_STREAM),
+      openPrompts: prompts.openCount,
     })
   }
   if (req.method !== 'POST') return json({ error: 'not found' }, 404)
@@ -732,6 +933,70 @@ async function handle(req: Request): Promise<Response> {
       return json({ messages: takeInbox(session_id).map(m => ({ text: m.text, by: m.by })) } satisfies InboxTakeResult)
     }
 
+    case '/orchestrator/connect': {
+      let ping: ReturnType<typeof setInterval>
+      let mine: ReadableStreamDefaultController<Uint8Array>
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          mine = controller
+          try { streams.get(ORCHESTRATOR_STREAM)?.close() } catch {} // one orchestrator: the newest wins
+          streams.set(ORCHESTRATOR_STREAM, controller)
+          toOrchestrator({ type: 'hello', name: 'orchestrator' })
+          for (const p of prompts.answered()) toOrchestrator(answerEvent(p)) // answered while it was away
+          ping = setInterval(() => {
+            if (!toOrchestrator({ type: 'ping' })) clearInterval(ping)
+          }, 20_000)
+          log('orchestrator connected')
+        },
+        cancel() {
+          clearInterval(ping)
+          if (streams.get(ORCHESTRATOR_STREAM) !== mine) return
+          streams.delete(ORCHESTRATOR_STREAM)
+          log('orchestrator disconnected')
+        },
+      })
+      return new Response(stream, { headers: { 'Content-Type': 'application/x-ndjson' } })
+    }
+
+    case '/prompt':
+      return json(await postPrompt(body as PromptBody))
+
+    case '/prompt/ack': {
+      const { id } = body as { id: string }
+      return json({ ok: !!prompts.remove(id) })
+    }
+
+    case '/prompt/cancel': {
+      const { id, note } = body as { id: string; note?: string }
+      const p = prompts.remove(id)
+      if (!p) return json({ ok: false })
+      await dropButtons(p)
+      const anchor = p.messages.filter(m => m.buttons).length ? p.messages.filter(m => m.buttons) : p.messages.slice(-1)
+      await Promise.all(anchor.map(m => bot.api.sendMessage(m.chatId, `✖️ ${note?.trim() || 'Withdrawn'}`, {
+        message_thread_id: m.threadId,
+        reply_parameters: { message_id: m.messageId, allow_sending_without_reply: true },
+      }).catch(() => {})))
+      log(`prompt ${id} cancelled`)
+      return json({ ok: true })
+    }
+
+    case '/notice': {
+      const p = body as NoticeBody
+      if (!p.text?.trim() && !p.files?.length) return json({ error: 'text or files required' } satisfies NoticeResult)
+      const r = await sendTo(p.topic, { text: p.text ?? '', files: p.files ?? [], format: p.format })
+      if (r.messages.length === 0) return json({ error: r.error ?? 'could not send' } satisfies NoticeResult)
+      return json({ message_ids: r.messages.map(m => m.messageId) } satisfies NoticeResult)
+    }
+
+    case '/topic/ensure': {
+      const { topic } = body as { topic?: string }
+      if (!topic?.trim()) return json({ error: 'topic required' } satisfies TopicResult)
+      if (!topicsGroupId()) return json({ error: 'no topics group configured (/telegram-plus:access set topicsGroup)' } satisfies TopicResult)
+      topicFailures.delete(topic)
+      const t = await topicFor(topic.trim())
+      return json((t ? { chat_id: t.chatId, thread_id: t.threadId } : { error: 'could not create the topic (see hub.log)' }) satisfies TopicResult)
+    }
+
     case '/ask': {
       const p = body as AskBody
       if (!p.session || typeof p.question !== 'string' || !p.question.trim()) return json({ error: 'session and question required' }, 400)
@@ -802,6 +1067,11 @@ const pruneQuestions = () => {
   for (const q of questions.prune()) void closeQuestion(q, '⌛ Expired — nobody is waiting for this answer anymore')
 }
 pruneQuestions()
+const prunePrompts = () => {
+  for (const p of prompts.prune()) void dropButtons(p)
+}
+prunePrompts()
+setInterval(prunePrompts, 60 * 60 * 1000).unref()
 setInterval(pruneQuestions, 60 * 60 * 1000).unref()
 const sweepInbox = () => {
   const n = cleanInbox(INBOX_DIR, INBOX_MAX_AGE_MS)
@@ -830,7 +1100,7 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 
 setInterval(() => {
   // Open questions keep the hub polling: their answer can come any time.
-  if (streams.size === 0 && hookRequests.size === 0 && questions.openCount === 0 && Date.now() - lastActivity > HUB_IDLE_MS) {
+  if (streams.size === 0 && hookRequests.size === 0 && questions.openCount === 0 && prompts.openCount === 0 && Date.now() - lastActivity > HUB_IDLE_MS) {
     shutdown(`idle for ${Math.round(HUB_IDLE_MS / 60000)}m with no sessions`)
   }
 }, Math.min(60_000, HUB_IDLE_MS)).unref()
@@ -850,11 +1120,25 @@ void (async () => {
             [
               { command: 'sessions', description: 'List connected Claude Code sessions' },
               { command: 'use', description: 'Send messages to a session: /use <name>' },
+              { command: 'queue', description: "Show the orchestrator's task queue" },
+              { command: 'level', description: 'Set the autonomy level: /level <0|1|2>' },
+              { command: 'cancel', description: 'Cancel a task: /cancel <id>' },
+              { command: 'setup', description: 'Set up a project: /setup <name> <repo-url>' },
               { command: 'status', description: 'Check your pairing status' },
               { command: 'help', description: 'What this bot can do' },
               { command: 'start', description: 'Welcome and setup guide' },
             ],
             { scope: { type: 'all_private_chats' } },
+          ).catch(() => {})
+          void bot.api.setMyCommands(
+            [
+              { command: 'task', description: 'New task for this project: /task <request>' },
+              { command: 'queue', description: "Show the orchestrator's task queue" },
+              { command: 'level', description: 'Set the autonomy level: /level <0|1|2>' },
+              { command: 'cancel', description: 'Cancel a task: /cancel <id>' },
+              { command: 'setup', description: 'Set up a project: /setup <name> <repo-url>' },
+            ],
+            { scope: { type: 'all_group_chats' } },
           ).catch(() => {})
         },
       })

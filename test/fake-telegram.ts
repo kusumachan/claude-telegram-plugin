@@ -73,6 +73,9 @@ export class FakeTelegram {
         return { id: 1, is_bot: true, first_name: 'Bot', username: 'test_bot' }
       case 'createForumTopic':
         return { message_thread_id: this.nextThreadId++, name: params.name, icon_color: 0 }
+      case 'sendDocument':
+      case 'sendPhoto':
+        return { message_id: this.nextMessageId++, date: Math.floor(Date.now() / 1000), chat: { id: Number(params.chat_id), type: 'private' } }
       case 'sendMessage':
         return {
           message_id: this.nextMessageId++,
@@ -120,6 +123,7 @@ export class FakeTelegram {
         chat: { id: chatId, type: 'supergroup', title: 'Claude', is_forum: true },
         from: { id: userId, is_bot: false, first_name: 'User', username: `user${userId}` },
         text,
+        ...(text.startsWith('/') ? { entities: [{ type: 'bot_command', offset: 0, length: text.split(' ')[0]!.length }] } : {}),
         ...(threadId != null ? { message_thread_id: threadId, is_topic_message: true } : {}),
         ...(replyTo != null
           ? { reply_to_message: { message_id: replyTo, date: 0, chat: { id: chatId, type: 'supergroup' }, from: { id: 1, is_bot: true, first_name: 'Bot', username: 'test_bot' }, text: '…' } }
