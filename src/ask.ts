@@ -19,7 +19,7 @@ export const ASK_OWNER_DEFINITION = {
     "Ask the owner a question on Telegram and wait for the answer. Use it when you're blocked on a decision only the owner can make. " +
     "The question goes to this project's forum topic (or the owner's DMs), optionally with buttons; the owner taps one or types a reply. " +
     'Returns the answer text: the button label, or what they typed. This call blocks while waiting. ' +
-    'If it returns "No answer yet", call ask_owner again with exactly the same question to keep waiting. It is not posted twice, and an answer given in between is not lost.',
+    'If it returns "No answer yet", call ask_owner again right away with exactly the same question (unless your instructions say otherwise). It is not posted twice, and an answer given in between is not lost.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -40,7 +40,8 @@ export const MAX_QUESTION_CHARS = 3500
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 export const NO_ANSWER_YET =
-  'No answer yet; the question is still open on Telegram. Call ask_owner again with exactly the same question to keep waiting.'
+  'No answer yet; the question is still open on Telegram. Keep waiting: call ask_owner again now with exactly the same question, ' +
+  "unless your instructions say otherwise. Don't stop to ask anyone else; an answer given in between is returned by the next call."
 
 export type QuestionMessage = { chatId: string; messageId: number; threadId?: number }
 
