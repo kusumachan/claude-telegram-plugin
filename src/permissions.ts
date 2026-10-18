@@ -54,8 +54,9 @@ export class PermissionRelay {
     return this.pending.has(request_id)
   }
 
-  /** Send the prompt; resolves to how many recipients actually got it. */
-  async request(req: PermissionRequest, recipients: Recipient[], now = Date.now(), label?: string): Promise<number> {
+  /** Send the prompt; resolves to how many recipients actually got it, and why the others didn't. */
+  async request(req: PermissionRequest, recipients: Recipient[], now = Date.now(), label?: string): Promise<{ delivered: number; errors: unknown[] }> {
+    const errors: unknown[] = []
     const entry: Entry = { ...req, createdAt: now, label, messages: [] }
     this.pending.set(req.request_id, entry)
     const keyboard = new InlineKeyboard()
@@ -71,11 +72,12 @@ export class PermissionRelay {
         })
         entry.messages.push({ chatId, messageId: sent.message_id })
       } catch (e) {
+        errors.push(e)
         this.log(`permission_request send to ${chatId}${threadId != null ? `#${threadId}` : ''} failed: ${e}`)
       }
     }))
     if (entry.messages.length === 0) this.pending.delete(req.request_id)
-    return entry.messages.length
+    return { delivered: entry.messages.length, errors }
   }
 
   /** Full details for the "See more" button, or undefined if unknown/expired. */

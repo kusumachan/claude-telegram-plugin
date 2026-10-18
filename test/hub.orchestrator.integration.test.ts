@@ -187,6 +187,26 @@ describe('orchestrator API', () => {
     expect(await h.hub.post('/notice/edit', { text: 'x' })).toEqual({ error: 'chat_id and message_id required' })
   })
 
+  test('notices and prompts to a deleted topic recreate it and go there, not to DMs', async () => {
+    const created = () => h.tg.calls.filter(c => c.method === 'createForumTopic' && c.params.name === 'proj')
+    h.tg.deletedThreads.add(thread)
+    const n = await h.hub.post<NoticeResult>('/notice', { topic: 'proj', text: 'Task 6: analyzing' })
+    if ('error' in n) throw new Error(n.error)
+    const fresh = created().at(-1)!.result.message_thread_id
+    expect(fresh).not.toBe(thread)
+    expect(n.messages).toEqual([{ chat_id: G, message_id: expect.any(Number), thread_id: fresh }])
+    expect(h.tg.calls.some(c => c.method === 'sendMessage' && c.params.text === 'Task 6: analyzing' && c.params.chat_id === String(USER))).toBe(false)
+    expect(await h.hub.post('/topic/ensure', { topic: 'proj' })).toEqual({ chat_id: G, thread_id: fresh })
+
+    h.tg.deletedThreads.add(fresh)
+    promptOf(await h.hub.post<PromptResult>('/prompt', { topic: 'proj', text: 'Gate for task 6', buttons: [['Continue']] }))
+    const again = created().at(-1)!.result.message_thread_id
+    expect(again).not.toBe(fresh)
+    const gate = h.tg.calls.filter(c => c.method === 'sendMessage' && c.params.text === 'Gate for task 6')
+    expect(gate.map(c => [c.params.message_thread_id, !!c.result])).toEqual([[fresh, false], [again, true]])
+    thread = again
+  })
+
   test('OrchestratorClient: run() receives commands and answers; prompt() posts', async () => {
     orch.close()
     await Bun.sleep(100)

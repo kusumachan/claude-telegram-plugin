@@ -100,20 +100,21 @@ describe('hub with forum topics', () => {
     expect(await pending).toEqual({})
   })
 
-  test('a deleted topic falls back to DMs and is recreated next time', async () => {
-    h.tg.deletedThreads.add(topicThread('mobile')!)
+  test('a deleted topic is recreated and the approval goes there', async () => {
+    const old = topicThread('mobile')!
+    h.tg.deletedThreads.add(old)
+    const before = h.tg.calls.filter(c => c.method === 'createForumTopic' && c.params.name === 'mobile').length
     const pending = h.hub.post<HookPermissionResult>('/hook/permission', {
       session_id: 'worker-3', cwd: '/code/mobile', tool_name: 'Edit', tool_input: {},
     })
-    const dm = await h.tg.waitFor(c => c.method === 'sendMessage' && c.params.chat_id === String(USER) && /Permission: Edit/.test(c.params.text))
-    expect(dm).toBeTruthy()
+    await h.tg.waitFor(() => h.tg.calls.filter(c => c.method === 'createForumTopic' && c.params.name === 'mobile').length > before)
+    const thread = h.tg.calls.filter(c => c.method === 'createForumTopic' && c.params.name === 'mobile').at(-1)!.result.message_thread_id
+    topicThreads.mobile = thread
+    expect(thread).not.toBe(old)
+    await h.tg.waitFor(c => c.method === 'sendMessage' && c.params.message_thread_id === thread && /Permission: Edit/.test(c.params.text))
+    expect(h.tg.calls.some(c => c.method === 'sendMessage' && c.params.chat_id === String(USER) && /Permission: Edit/.test(c.params.text))).toBe(false)
     await h.hub.post('/hook/event', { session_id: 'worker-3', hook_event_name: 'Stop' })
     await pending
-
-    const before = h.tg.calls.filter(c => c.method === 'createForumTopic' && c.params.name === 'mobile').length
-    void h.hub.post('/hook/permission', { session_id: 'worker-4', cwd: '/code/mobile', tool_name: 'Edit', tool_input: {} })
-    await h.tg.waitFor(() => h.tg.calls.filter(c => c.method === 'createForumTopic' && c.params.name === 'mobile').length > before)
-    await h.hub.post('/hook/event', { session_id: 'worker-4', hook_event_name: 'Stop' })
   })
 
   test('a reconnecting session reuses its topic', async () => {

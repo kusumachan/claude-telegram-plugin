@@ -197,7 +197,7 @@ What happens:
 - When a channel session connects, the hub creates a topic named after it, or reuses the existing one (`<state-dir>/topics.json`). Messages in that topic always go to that session. If it isn't running, the bot says so.
 - Approval prompts and notices from any session (including `claude --bg` workers and worktrees) go to their project's topic, created on first use. Only allowlisted users can tap Allow/Deny there.
 - Replies in a session's own topic skip the `[name]` prefix.
-- If the bot can't create topics (no admin rights, Topics off), it logs why in `hub.log` and falls back to DMs. A topic deleted in Telegram is recreated on next use.
+- If the bot can't create topics (no admin rights, Topics off), it logs why in `hub.log` and falls back to DMs. A topic deleted in Telegram is recreated as soon as something is sent to it, and the message goes to the new topic.
 
 Everyone in the group can read what's posted there, including approval prompts with command previews. Keep the topics group to yourself or people you trust.
 
