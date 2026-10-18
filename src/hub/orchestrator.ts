@@ -9,6 +9,8 @@
  *   const hub = new OrchestratorClient(stateDir, '/path/to/plugin/hub.ts')
  *   hub.run(e => { if (e.type === 'command') ...; if (e.type === 'prompt_answer') ... })
  *   const { id } = await hub.prompt({ key: 'task-12-gate1', topic: 'project-x', text: 'Spec ready', buttons: [['Continue', 'Revise']], needs_text: ['Revise'] })
+ *   const n = await hub.notice({ topic: 'project-x', text: 'Task 12: analyzing' })
+ *   if ('messages' in n) await hub.editNotice({ ...n.messages[0]!, text: 'Task 12: developing' })
  */
 import { HubClient } from './client.ts'
 
@@ -82,7 +84,17 @@ export type PromptBody = Target & {
 export type PromptResult = { id: string; message_ids: number[] } | { error: string }
 
 export type NoticeBody = Target & { text?: string; files?: string[]; format?: 'text' | 'html' | 'markdownv2' }
-export type NoticeResult = { message_ids: number[] } | { error: string }
+/** One sent message. Plain data: keep it in your own state and edit it after a restart. */
+export type NoticeRef = { chat_id: string; message_id: number; thread_id?: number }
+/** `messages` in send order (files first, then text chunks; one set per DM without a topic). */
+export type NoticeResult = { message_ids: number[]; messages: NoticeRef[] } | { error: string }
+
+export type EditNoticeBody = NoticeRef & { text: string; format?: 'text' | 'html' | 'markdownv2' }
+export type EditNoticeResult =
+  /** `unchanged`: the text was already that (counts as success). `plain`: Telegram rejected the markup, so it was edited as plain text. */
+  | { ok: true; unchanged?: true; plain?: true }
+  /** `gone`: the message no longer exists or can't be edited (deleted, too old, not a text message). Post a new one. */
+  | { error: string; gone?: true }
 
 export type TopicResult = { chat_id: string; thread_id: number } | { error: string }
 
@@ -138,6 +150,11 @@ export class OrchestratorClient {
   /** Post text and/or files to a project topic or the owner's DMs. */
   notice(body: NoticeBody): Promise<NoticeResult> {
     return this.hub.post('/notice', body, 120_000)
+  }
+
+  /** Replace the text of a message a notice sent (e.g. a status line edited in place). Pass a ref from notice(). */
+  editNotice(body: EditNoticeBody): Promise<EditNoticeResult> {
+    return this.hub.post('/notice/edit', body)
   }
 
   /** Make sure a project has a forum topic; returns where it is. */

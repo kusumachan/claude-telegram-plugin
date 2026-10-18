@@ -33,6 +33,8 @@ import {
 import { buildKeyboard } from './src/buttons.ts'
 import { type InboxConnectBody, type InboxMessage, type InboxTakeBody, type InboxTakeResult } from './src/inbox.ts'
 import {
+  type EditNoticeBody,
+  type EditNoticeResult,
   type NoticeBody,
   type NoticeResult,
   ORCHESTRATOR_COMMANDS,
@@ -475,6 +477,26 @@ async function sendTo(topicKey: string | undefined, args: Record<string, unknown
   }
   if (access.allowFrom.length === 0) all.error = 'nobody to send to: no Telegram user is allowlisted'
   return all
+}
+
+// Telegram's answers for a message that can't be edited any more: post a new one instead.
+const EDIT_GONE = /message to edit not found|message can't be edited|no text in the message|MESSAGE_ID_INVALID|chat not found/i
+
+/** Edit through the edit_message tool's code path ("not modified" is fine, markup falls back to plain). */
+async function editNotice(p: EditNoticeBody): Promise<EditNoticeResult> {
+  if (p.chat_id == null || !Number.isInteger(p.message_id)) return { error: 'chat_id and message_id required' }
+  if (typeof p.text !== 'string' || !p.text.trim()) return { error: 'text required' }
+  const r = await callTool(toolDeps, 'edit_message', {
+    chat_id: String(p.chat_id), message_id: String(p.message_id), text: p.text, format: p.format,
+  })
+  const text = r.content[0]?.text ?? ''
+  if (r.isError) {
+    const error = text.replace(/^edit_message failed: /, '')
+    return EDIT_GONE.test(error) ? { error, gone: true } : { error }
+  }
+  if (text.startsWith('unchanged')) return { ok: true, unchanged: true }
+  if (text.startsWith('edited as plain text')) return { ok: true, plain: true }
+  return { ok: true }
 }
 
 async function postPrompt(p: PromptBody): Promise<PromptResult> {
@@ -1040,8 +1062,14 @@ async function handle(req: Request): Promise<Response> {
       if (!p.text?.trim() && !p.files?.length) return json({ error: 'text or files required' } satisfies NoticeResult)
       const r = await sendTo(p.topic, { text: p.text ?? '', files: p.files ?? [], format: p.format })
       if (r.messages.length === 0) return json({ error: r.error ?? 'could not send' } satisfies NoticeResult)
-      return json({ message_ids: r.messages.map(m => m.messageId) } satisfies NoticeResult)
+      return json({
+        message_ids: r.messages.map(m => m.messageId),
+        messages: r.messages.map(m => ({ chat_id: m.chatId, message_id: m.messageId, ...(m.threadId != null ? { thread_id: m.threadId } : {}) })),
+      } satisfies NoticeResult)
     }
+
+    case '/notice/edit':
+      return json(await editNotice(body as EditNoticeBody))
 
     case '/topic/ensure': {
       const { topic } = body as { topic?: string }
