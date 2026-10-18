@@ -4,61 +4,78 @@ Connect a Telegram bot to your Claude Code session with an MCP channel server.
 
 Based on the official [`telegram` plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram) (Apache-2.0), restructured into modules with tests, several security/reliability fixes, and richer inbound context. See [What's different](#whats-different-from-upstream).
 
-## Prerequisites
+## Setup
 
-- Claude Code signed in with a claude.ai account or a Console API key (channels aren't available on Bedrock, Vertex, or Foundry). Team/Enterprise orgs must enable channels first.
-- [Bun](https://bun.sh) — `curl -fsSL https://bun.sh/install | bash` or `brew install oven-sh/bun/bun`.
+Setup takes about 10 minutes. Part 1 is all you need to chat with Claude from your phone. Part 2 adds one forum topic per project. It's optional, except **if you use [claude-orchestrator](#orchestrator-api), which needs Part 2**.
 
-## Quick setup
+Each step says where to run it:
 
-1. **Create a bot** — DM [@BotFather](https://t.me/BotFather), send `/newbot`, copy the token (`123456789:AAH…`).
-2. **Install the plugin** (from a local checkout):
-   ```
-   /plugin marketplace add /path/to/claude-telegram-plugin
-   /plugin install telegram-plus@telegram-plus-dev
-   ```
-3. **Save the token:** `/telegram-plus:configure 123456789:AAH...`
-   This writes `~/.claude/channels/telegram-plus/.env`. A shell `TELEGRAM_BOT_TOKEN` takes precedence.
-4. **Start a channel session with the launcher:**
-   ```sh
-   /path/to/claude-telegram-plugin/bin/claude-telegram
-   ```
-   It runs `claude --dangerously-load-development-channels plugin:telegram-plus@telegram-plus-dev` and marks that one session as the channel. Extra arguments pass through to `claude`; set `TELEGRAM_PLUS_PLUGIN` if you installed from a different marketplace. Tip: `alias claude-tg=/path/to/claude-telegram-plugin/bin/claude-telegram`.
+- 📱 **Telegram**: on your phone or in Telegram Desktop.
+- 💻 **Terminal**: your normal shell (zsh/bash).
+- 🤖 **Claude Code**: type it at the Claude Code prompt (commands starting with `/`).
 
-   Why a launcher: channels are a research preview and `--channels` only accepts Anthropic-allowlisted plugins, so this plugin needs the development flag (interactive sessions only; it's ignored with `-p` and the Agent SDK). On top of that, Claude Code starts the plugin's MCP server in **every** session where the plugin is enabled and gives it no way to tell whether that session registered it as a channel. Without the launcher's marker every session would poll the bot and evict the others. Sessions not started via the launcher run tools-only: no polling, but notification hooks still work (see below).
-5. **Pair** — DM your bot, it replies with a 6-char code; run `/telegram-plus:access pair <code>`.
-6. **Lock it down:** `/telegram-plus:access policy allowlist`.
+### Before you start
 
-> Run multiple bots by pointing `TELEGRAM_STATE_DIR` at a different directory per instance.
-> State lives in `channels/telegram-plus`, separate from the official plugin — don't run both on the same token (Telegram allows one poller per token).
+- **Claude Code**, signed in with a claude.ai account or a Console API key. Channels don't work on Bedrock, Vertex or Foundry. Team/Enterprise orgs must turn channels on first.
+- **Bun**. 💻 `curl -fsSL https://bun.sh/install | bash` (or `brew install oven-sh/bun/bun`). Check with `bun --version`.
 
-## How it fits together
+### Part 1: chat with Claude in a DM
 
+**Step 1. Create a bot.** 📱
+Open [@BotFather](https://t.me/BotFather), send `/newbot` and follow the questions (a display name, then a username ending in `bot`). BotFather replies with a **token** that looks like `123456789:AAH…`. Keep it secret; anyone with it controls the bot.
+
+**Step 2. Install the plugin.** 🤖
+Start Claude Code anywhere (`claude`) and run:
 ```
-Telegram ⇄ hub (one per bot: polls, routes, relays approvals; unix socket in the state dir)
-             ⇅ channel session "api"  (bin/claude-telegram in ~/code/api)
-             ⇅ channel session "web"  (bin/claude-telegram in ~/code/web)
-             ⇐ hooks from any other session: notifications + approvals
+/plugin marketplace add kusumachan/claude-telegram-plugin
+/plugin install telegram-plus@telegram-plus-dev
 ```
+Then run `/reload-plugins`, or quit and start Claude Code again. No need to clone the repo; Claude Code downloads it.
 
-- **The hub** (`hub.ts`) is the only process that talks to Telegram's `getUpdates`, so any number of sessions can share one bot without 409 conflicts. It starts automatically the first time something needs it and exits after 10 minutes with nothing connected. Log: `<state-dir>/hub.log`.
-- **Channel sessions** are started with `bin/claude-telegram`. Each registers with the hub under its project folder name (override with `TELEGRAM_PLUS_NAME=...`).
-- **Every other session** with the plugin enabled is tools-only, and gets notifications and Telegram approvals through hooks.
+**Step 3. Save the bot token.** 🤖
+```
+/telegram-plus:configure 123456789:AAH...
+```
+The token is saved to `~/.claude/channels/telegram-plus/.env`. You only do this once.
 
-## Multiple sessions
+**Step 4. Add the `claude-tg` command.** 💻
+Add this line to `~/.zshrc` (or `~/.bashrc`), then open a new terminal:
+```sh
+claude-tg() { sh -c 'export TELEGRAM_PLUS_CHANNEL_PID=$$; exec claude --dangerously-load-development-channels plugin:telegram-plus@telegram-plus-dev "$@"' claude-tg "$@"; }
+```
+`claude-tg` starts Claude Code connected to Telegram. Plain `claude` still starts a normal session. [Why is this needed?](#why-a-launcher)
 
-With several channel sessions connected, the hub decides where each message goes:
+**Step 5. Start Claude with `claude-tg`.** 💻
+Quit Claude Code, go to the project you want to work on, and start it with `claude-tg`:
+```sh
+cd ~/code/my-project
+claude-tg
+```
+Claude Code may show a warning about development channels. Accept it. This session is now connected to Telegram.
 
-1. A **reply** to a message a session sent goes back to that session.
-2. Otherwise it goes to the chat's **active** session: `/use api`, or tap one under `/sessions`.
-3. With only **one** session connected, it goes there.
-4. Otherwise the hub holds the message and asks *"Which session should get this?"* with a button per session.
+**Step 6. Pair your Telegram account.** 📱 then 🤖
+Keep the session from step 5 running. Send any message to your bot in Telegram. It replies with a code:
+```
+Pairing required — run in Claude Code:
+/telegram-plus:access pair a1b2c3
+```
+Run that command in Claude Code. Send your bot another message: Claude now answers it in Telegram.
 
-Replies are prefixed with the session name (`[api] …`) whenever more than one is connected.
+**Step 7. Lock the bot.** 🤖
+```
+/telegram-plus:access policy allowlist
+```
+From now on the bot ignores everyone you haven't paired. Do this as soon as everyone who should use the bot (usually just you) is paired.
 
-## Forum topics: one topic per project
+**Check it.** 🤖 `/telegram-plus:access` shows your policy (`allowlist`) and your Telegram user id under `allowFrom`. Note the id; Part 2 needs it.
 
-Instead of switching with `/use`, give every project its own topic in a Telegram forum group:
+That's Part 1. Every time you want Claude on Telegram, start the session with `claude-tg`. Other sessions started with plain `claude` still send you approvals and "done" notices on Telegram ([details](#notifications-and-approvals-from-any-session)).
+
+### Part 2 (optional): one topic per project
+
+Required if you use claude-orchestrator.
+
+Instead of a single DM, use a group with **Topics**. Each project gets its own topic, so chats, approvals and notices for `api` and `web` stay separate.
 
 ```
 Group "Claude" (Topics on)
@@ -67,16 +84,113 @@ Group "Claude" (Topics on)
 └─ General  ← /sessions, picker, everything else
 ```
 
-Setup:
+**Step 1. Create the group.** 📱
+Create a new group (just you in it), open its settings and turn **Topics** on.
 
-1. Create a group, turn on **Topics** (Group settings → Topics), add the bot and make it an **admin with "Manage Topics"**.
-2. In @BotFather: `/setprivacy` → your bot → **Disable** (so the bot sees every message in the topics), then remove and re-add the bot to the group.
-3. Get the group id (`-100…`). In [Telegram Web](https://web.telegram.org/a) it's in the URL after `#`. In Telegram Desktop, enable Settings → Advanced → Experimental → "Show Peer IDs in Profile".
-4. In Claude Code:
-   ```
-   /telegram-plus:access group add -100XXXXXXXXXX --no-mention --allow <your-telegram-id>
-   /telegram-plus:access set topicsGroup -100XXXXXXXXXX
-   ```
+**Step 2. Add the bot as an admin.** 📱
+Add your bot to the group, then make it an **admin** with the **Manage Topics** permission.
+
+**Step 3. Let the bot see all messages.** 📱
+In @BotFather send `/setprivacy`, pick your bot and choose **Disable**. Then **remove the bot from the group and add it again** (and make it admin again). Telegram only applies the privacy change when the bot rejoins.
+
+**Step 4. Find the group id.** 📱
+It's a negative number starting with `-100`, like `-1001234567890`.
+- [Telegram Web](https://web.telegram.org/a): open the group; the id is in the address bar after `#`. If it shows `-123…` without the `100`, put `-100` in front of the digits.
+- Telegram Desktop: Settings → Advanced → Experimental settings → turn on "Show Peer IDs in Profile", then open the group's profile.
+
+**Step 5. Tell the plugin about the group.** 🤖
+Replace the group id and your Telegram user id (from Part 1, "Check it"):
+```
+/telegram-plus:access group add -1001234567890 --no-mention --allow 412587349
+/telegram-plus:access set topicsGroup -1001234567890
+```
+`--no-mention` lets you write without @mentioning the bot. `--allow` makes sure only you can talk to Claude in that group.
+
+**Check it.** 💻 Start `claude-tg` in a project. A topic named after the project folder appears in the group with a welcome message. Write in that topic and Claude answers there.
+
+If no topic appears, look at the end of `~/.claude/channels/telegram-plus/hub.log`. The usual cause is that the bot isn't an admin with Manage Topics, or Topics is off. Until it's fixed, everything goes to your DM.
+
+### Troubleshooting
+
+| Problem | Fix |
+| --- | --- |
+| The bot doesn't reply at all | Is a session started with `claude-tg` (not plain `claude`) running? Check `~/.claude/channels/telegram-plus/hub.log`. |
+| "Pairing required" again after pairing | Run the exact `pair` command from the bot's latest message. Codes expire after an hour. |
+| The bot ignores group messages | Privacy mode is still on: redo Part 2, step 3, including removing and re-adding the bot. |
+| `/telegram-plus:...` commands don't exist | The plugin isn't loaded: run `/reload-plugins` or restart Claude Code. |
+| A new version doesn't show up | Run `/plugin marketplace update telegram-plus-dev`, then `/plugin` → update telegram-plus, then restart Claude Code. |
+
+### Good to know
+
+- **Several bots:** give each one its own state directory with `TELEGRAM_STATE_DIR=/some/dir`.
+- **Don't run this together with the official `telegram` plugin on the same token.** Telegram allows only one reader per bot. Their settings are kept apart (this one uses `channels/telegram-plus`), but the token can't be shared.
+- A `TELEGRAM_BOT_TOKEN` in your shell overrides the saved token.
+
+### Why a launcher?
+
+Channels are a research preview. `--channels` only accepts plugins Anthropic has allowlisted, so this plugin needs the `--dangerously-load-development-channels` flag. `claude-tg` (or the equivalent script in this repo, [`bin/claude-telegram`](bin/claude-telegram)) runs `claude --dangerously-load-development-channels plugin:telegram-plus@telegram-plus-dev` for you. It works only in interactive sessions; the flag is ignored with `-p` and the Agent SDK.
+
+It also marks its session as *the* channel session. Claude Code starts the plugin's server in **every** session where the plugin is enabled, and gives the server no way to tell whether that session registered it as a channel. Without the marker, every session would read the bot and push the others off. Sessions not started via the launcher run tools-only: they don't read the bot, but notifications, approvals and `ask_owner` still work.
+
+Extra arguments pass through to `claude`. If you installed the plugin from a different marketplace, change `telegram-plus-dev` in the command (`bin/claude-telegram` reads `TELEGRAM_PLUS_PLUGIN` instead).
+
+Working on the plugin itself? Clone the repo, run `/plugin marketplace add /path/to/clone` instead of the GitHub name, and see [Development](#development).
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    TG["Telegram<br/>(DMs and topics group)"] <--> HUB["hub<br/>one per bot"]
+    HUB <--> API["channel session 'api'<br/>claude-tg in ~/code/api"]
+    HUB <--> WEB["channel session 'web'<br/>claude-tg in ~/code/web"]
+    HUB <--> ORC["claude-orchestrator<br/>(optional)"]
+    OTHER["any other session<br/>plain claude"] -- "approvals, notices,<br/>ask_owner, inbox" --> HUB
+```
+
+- **The hub** (`hub.ts`) is the only process that talks to Telegram's `getUpdates`, so any number of sessions can share one bot without 409 conflicts. It starts automatically the first time something needs it and exits after 10 minutes with nothing connected. Log: `<state-dir>/hub.log`.
+- **Channel sessions** are started with `claude-tg` (or `bin/claude-telegram`). Each registers with the hub under its project folder name (override with `TELEGRAM_PLUS_NAME=...`).
+- **Every other session** with the plugin enabled is tools-only, and gets notifications and Telegram approvals through hooks.
+
+## Multiple sessions
+
+With several channel sessions connected, the hub decides where each message goes:
+
+```mermaid
+flowchart TD
+    M["Message from an allowlisted user"] --> CMD{"/task /queue /cancel<br/>/level /setup?"}
+    CMD -- yes --> O["orchestrator"]
+    CMD -- no --> P{"Answers an open<br/>orchestrator prompt?"}
+    P -- yes --> O
+    P -- no --> CT{"In the 🎛 control topic?"}
+    CT -- yes --> O
+    CT -- no --> Q{"Answers an open<br/>ask_owner question?"}
+    Q -- yes --> QA["the asking session"]
+    Q -- no --> IN{"For an inbox session?<br/>(reply to it, or its topic)"}
+    IN -- yes --> IS["that session's inbox"]
+    IN -- no --> R{"Reply to a message<br/>a session sent?"}
+    R -- yes --> RS["that session"]
+    R -- no --> T{"In a project topic?"}
+    T -- yes --> TS["that project's session<br/>(or 'isn't connected')"]
+    T -- no --> A{"Active session set<br/>with /use?"}
+    A -- yes --> AS["the active session"]
+    A -- no --> ONE{"Only one session<br/>connected?"}
+    ONE -- yes --> OS["that session"]
+    ONE -- no --> PK["'Which session should get this?'<br/>picker buttons"]
+```
+
+The plain-message rules for channel sessions, in order:
+
+1. A **reply** to a message a session sent goes back to that session.
+2. In a project's **forum topic**, it goes to that project's session (see [Forum topics](#forum-topics-one-topic-per-project)).
+3. Otherwise it goes to the chat's **active** session: `/use api`, or tap one under `/sessions`.
+4. With only **one** session connected, it goes there.
+5. Otherwise the hub holds the message and asks *"Which session should get this?"* with a button per session.
+
+Replies are prefixed with the session name (`[api] …`) whenever more than one is connected.
+
+## Forum topics: one topic per project
+
+Instead of switching with `/use`, every project gets its own topic in a Telegram forum group. Setup is in [Part 2](#part-2-optional-one-topic-per-project).
 
 What happens:
 
@@ -117,7 +231,13 @@ Any session with the plugin enabled, including one not started with the launcher
 
 ## Messaging a running agent (inbox)
 
-A session that isn't a channel session can't receive Telegram messages. With `TELEGRAM_PLUS_INBOX=1` in its environment it gets an inbox instead. Owner messages are queued in the hub and handed to the model by the plugin's hooks:
+A session that isn't a channel session can't receive Telegram messages. With `TELEGRAM_PLUS_INBOX=1` in its environment it gets an inbox instead:
+
+```sh
+TELEGRAM_PLUS_INBOX=1 claude
+```
+
+Owner messages are queued in the hub and handed to the model by the plugin's hooks:
 
 - **After the current tool call** (`PostToolUse`, as `additionalContext`), or
 - **when the turn ends** (`Stop`, which blocks the stop with the message as the reason, so the agent keeps going; the terminal shows this as "Stop hook error", which is cosmetic).
@@ -181,7 +301,9 @@ In `-p` (headless) runs Claude Code cancels async hooks at teardown, so a "finis
 
 ## Orchestrator API
 
-A separate long-running process on the same machine (an orchestrator that runs Claude Code sessions for tasks) can use the hub too: [`src/hub/orchestrator.ts`](src/hub/orchestrator.ts) has the wire types and a small `OrchestratorClient`. It uses the same transport as everything else: HTTP over the hub's 0700 unix socket.
+**What it's for.** [claude-orchestrator](https://github.com/kusumachan/claude-orchestrator) turns one Telegram message into a pull request. You send `/task add a wishlist` in a project's topic, and it runs Claude Code sessions to analyze, build, review and test the change, asking you on Telegram at the gates you choose. It needs this plugin with a topics group ([Part 2](#part-2-optional-one-topic-per-project)). It creates the 🎛 Orchestrator control topic itself the first time it connects. You don't need `claude-tg` for it: its agents are plain `claude` sessions that use `TELEGRAM_PLUS_TOPIC` and `TELEGRAM_PLUS_INBOX`. To install it, see claude-orchestrator's `docs/installation.md`.
+
+The rest of this section is for developers. A separate long-running process on the same machine (an orchestrator that runs Claude Code sessions for tasks) can use the hub too: [`src/hub/orchestrator.ts`](src/hub/orchestrator.ts) has the wire types and a small `OrchestratorClient`. It uses the same transport as everything else: HTTP over the hub's 0700 unix socket.
 
 **Control topic.** When the orchestrator connects (with a topics group set), the hub creates a `🎛 Orchestrator` topic. Its key is `orchestratorTopic` in access, default `Orchestrator`. Every allowlisted plain message there goes to the orchestrator as a `message` event, never to a session, `ask_owner` or an inbox. The exception is answers to the orchestrator's own prompts there, which still arrive as `prompt_answer`. The bot reacts 👀. Attachments get "not supported", and with no orchestrator connected the bot replies "Orchestrator is not running." No session can use this key as its project topic: its questions, approvals and notices go to DMs instead.
 
