@@ -699,7 +699,7 @@ async function deliver(n: ChannelNotification): Promise<boolean> {
 
   if (route.kind === 'offline') {
     await bot.api.sendMessage(chatId,
-      `${route.name} isn't connected right now. Start it with bin/claude-telegram in that project.`,
+      `${route.name} isn't connected right now. Start it with claude-tg in that project.`,
       { message_thread_id: thread }).catch(() => {})
     return false
   }
@@ -707,7 +707,7 @@ async function deliver(n: ChannelNotification): Promise<boolean> {
   if (route.kind === 'none') {
     if (n.meta.chat_type === 'private') {
       await bot.api.sendMessage(chatId,
-        'No Claude Code session is connected right now. Start one with bin/claude-telegram.').catch(() => {})
+        'No Claude Code session is connected right now. Start one with claude-tg.').catch(() => {})
     }
     return false
   }
@@ -752,7 +752,7 @@ bot.command('sessions', async ctx => {
   if (!canSwitch(ctx, store.load())) return
   const chatId = String(ctx.chat.id)
   if (router.size === 0) {
-    await ctx.reply('No Claude Code session is connected. Start one with bin/claude-telegram.')
+    await ctx.reply('No Claude Code session is connected. Start one with claude-tg.')
     return
   }
   const active = router.activeFor(chatId)

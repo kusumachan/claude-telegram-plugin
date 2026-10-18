@@ -292,7 +292,7 @@ async function stayConnected(): Promise<void> {
 
 if (CHANNEL || INBOX) void stayConnected()
 if (INBOX) log('inbox mode: owner messages in this project\'s topic are delivered by hooks')
-else if (!CHANNEL) log('tools-only mode (not launched via bin/claude-telegram) — not receiving Telegram messages')
+else if (!CHANNEL) log('tools-only mode (not launched via claude-tg / bin/claude-telegram) — not receiving Telegram messages')
 
 // When Claude Code closes the MCP connection, stdin gets EOF. Exiting closes
 // our hub stream, which unregisters this session.
