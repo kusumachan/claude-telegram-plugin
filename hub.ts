@@ -206,16 +206,47 @@ async function topicFor(name: string): Promise<{ chatId: string; threadId: numbe
   }
 }
 
+/**
+ * Send to a project's topic. When the topic was deleted in Telegram, forget
+ * it, create it again and resend there once. Undefined → no topic to use
+ * (or the send failed for another reason): the caller falls back to DMs.
+ */
+async function inTopic<T>(
+  name: string,
+  send: (topic: { chatId: string; threadId: number }) => Promise<T>,
+  failure: (r: T) => string | undefined,
+): Promise<T | undefined> {
+  const topic = await topicFor(name)
+  if (!topic) return undefined
+  const r = await send(topic)
+  const err = failure(r)
+  if (err === undefined) return r
+  if (isMissingTopic(err)) {
+    topics.forget(topic.chatId, name)
+    const fresh = await topicFor(name)
+    if (fresh) {
+      log(`topic "${name}" (#${topic.threadId}) is gone — recreated as #${fresh.threadId}`)
+      const again = await send(fresh)
+      const err2 = failure(again)
+      if (err2 === undefined) return again
+      log(`send to topic "${name}" failed (${err2}) — using DMs`)
+      return undefined
+    }
+  }
+  log(`send to topic "${name}" failed (${err}) — using DMs`)
+  return undefined
+}
+
+const errorText = (err: unknown): string => err instanceof GrammyError ? err.description : String(err)
+
 /** Send an approval prompt to the project's topic, or allowlisted DMs. */
 async function requestApproval(req: PermissionRequest, name: string | undefined, access: Access): Promise<void> {
-  const topic = name && !isControlTopic(access, name) ? await topicFor(name) : undefined
-  const targets: Recipient[] = topic ? [topic] : access.allowFrom
-  const delivered = await relay.request(req, targets, Date.now(), name)
-  if (delivered === 0 && topic && name) {
-    // Topic deleted in Telegram: forget it (recreated next time), use DMs now.
-    topics.forget(topic.chatId, name)
-    await relay.request(req, access.allowFrom, Date.now(), name)
+  if (name && !isControlTopic(access, name)) {
+    const sent = await inTopic(name, t => relay.request(req, [t], Date.now(), name),
+      r => r.delivered ? undefined : errorText(r.errors[0]))
+    if (sent) return
   }
+  await relay.request(req, access.allowFrom, Date.now(), name)
 }
 
 // --- questions (ask_owner) -----------------------------------------------------
@@ -251,15 +282,11 @@ async function postQuestion(body: AskBody, access: Access): Promise<AskResult> {
   }
 
   const messages: QuestionMessage[] = []
-  const topic = isControlTopic(access, body.topic) ? undefined : await topicFor(body.topic)
-  if (topic) {
-    try {
-      messages.push(await send(topic.chatId, topic.threadId))
-    } catch (err) {
-      // Topic deleted in Telegram: forget it (recreated next time), use DMs now.
-      if (err instanceof GrammyError && isMissingTopic(err.description)) topics.forget(topic.chatId, body.topic)
-      log(`question to topic "${body.topic}" failed (${err}) — using DMs`)
-    }
+  if (body.topic && !isControlTopic(access, body.topic)) {
+    const r = await inTopic(body.topic,
+      t => send(t.chatId, t.threadId).catch((err: unknown) => ({ error: errorText(err) })),
+      r => 'error' in r ? r.error : undefined)
+    if (r && !('error' in r)) messages.push(r)
   }
   if (messages.length === 0) {
     for (const chatId of access.allowFrom) {
@@ -461,13 +488,8 @@ async function sendTo(topicKey: string | undefined, args: Record<string, unknown
     return { messages, ...(r.isError ? { error: r.content[0]?.text ?? 'send failed' } : {}) }
   }
   if (topicKey) {
-    const topic = await topicFor(topicKey)
-    if (topic) {
-      const r = await once(topic.chatId, topic.threadId)
-      if (!r.error || r.messages.length) return r
-      if (isMissingTopic(r.error)) topics.forget(topic.chatId, topicKey)
-      log(`send to topic "${topicKey}" failed (${r.error}) — using DMs`)
-    }
+    const r = await inTopic(topicKey, t => once(t.chatId, t.threadId), r => r.error && !r.messages.length ? r.error : undefined)
+    if (r) return r
   }
   const all: Sent = { messages: [] }
   for (const chatId of access.allowFrom) {

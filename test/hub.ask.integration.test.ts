@@ -52,6 +52,18 @@ describe('ask_owner with forum topics', () => {
     expect(await wait(h, id, 200)).toEqual({ status: 'pending' })
   })
 
+  test('a question to a deleted topic recreates it and is posted there', async () => {
+    idOf(await ask(h, 'First for project-y?', { topic: 'project-y' }))
+    const old = (await posted('First for project-y?')).params.message_thread_id
+    h.tg.deletedThreads.add(old)
+    idOf(await ask(h, 'Second for project-y?', { topic: 'project-y' }))
+    const fresh = h.tg.calls.filter(c => c.method === 'createForumTopic' && c.params.name === 'project-y').at(-1)!.result.message_thread_id
+    expect(fresh).not.toBe(old)
+    const q = await h.tg.waitFor(c => c.method === 'sendMessage' && c.params.text?.includes('Second for project-y?') && c.params.message_thread_id === fresh)
+    expect(q.params.chat_id).toBe(G)
+    expect(h.tg.calls.some(c => c.method === 'sendMessage' && c.params.chat_id === String(USER) && c.params.text?.includes('Second for project-y?'))).toBe(false)
+  })
+
   test('only allowlisted users can tap; the tap answers a waiting call', async () => {
     const id = idOf(await ask(h, 'Use Postgres or MySQL?'))
     const msg = await posted('Use Postgres or MySQL?')
