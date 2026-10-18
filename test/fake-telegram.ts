@@ -13,6 +13,8 @@ export class FakeTelegram {
   private nextThreadId = 500
   /** Forum topics the "user" deleted: posting there fails like real Telegram. */
   deletedThreads = new Set<number>()
+  /** One-shot failures: the next call to `method` (matching `when`) gets a 400 with this description. */
+  private rejects: { method: string; description: string; when?: (params: Record<string, any>) => boolean }[] = []
   private server: ReturnType<typeof Bun.serve>
   private waiters: (() => void)[] = []
 
@@ -46,6 +48,13 @@ export class FakeTelegram {
           params = text ? JSON.parse(text) : {}
         } catch {}
         if (method === 'getUpdates') return Response.json({ ok: true, result: await this.takeUpdates() })
+        const reject = this.rejects.findIndex(r => r.method === method && (!r.when || r.when(params)))
+        if (reject !== -1) {
+          const [r] = this.rejects.splice(reject, 1)
+          this.calls.push({ method, params })
+          for (const w of this.waiters.splice(0)) w()
+          return Response.json({ ok: false, error_code: 400, description: `Bad Request: ${r!.description}` })
+        }
         if (method === 'sendMessage' && this.deletedThreads.has(params.message_thread_id)) {
           this.calls.push({ method, params })
           for (const w of this.waiters.splice(0)) w()
@@ -65,6 +74,11 @@ export class FakeTelegram {
 
   stop(): void {
     this.server.stop(true)
+  }
+
+  /** Make the next `method` call (matching `when`) fail with "Bad Request: <description>". */
+  reject(method: string, description: string, when?: (params: Record<string, any>) => boolean): void {
+    this.rejects.push({ method, description, when })
   }
 
   private result(method: string, params: Record<string, any>): unknown {

@@ -5,7 +5,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { type NoticeResult, OrchestratorClient, type OrchestratorEvent, type PromptResult, type TopicResult } from '../src/hub/orchestrator.ts'
+import { type EditNoticeResult, type NoticeResult, OrchestratorClient, type OrchestratorEvent, type PromptResult, type TopicResult } from '../src/hub/orchestrator.ts'
 import { type Harness, startHub } from './hub-harness.ts'
 
 const USER = 42
@@ -156,6 +156,37 @@ describe('orchestrator API', () => {
     expect(await h.hub.post('/notice', {})).toEqual({ error: 'text or files required' })
   })
 
+  test('a notice returns refs, and /notice/edit edits it in place', async () => {
+    const n = await h.hub.post<NoticeResult>('/notice', { topic: 'proj', text: '<b>Task 4</b>: analyzing', format: 'html' })
+    if ('error' in n) throw new Error(n.error)
+    const ref = n.messages[0]!
+    expect(ref).toEqual({ chat_id: G, message_id: n.message_ids[0]!, thread_id: thread })
+
+    const edit = (text: string, extra: object = {}) => h.hub.post<EditNoticeResult>('/notice/edit', { ...ref, text, format: 'html', ...extra })
+    expect(await edit('<b>Task 4</b>: developing')).toEqual({ ok: true })
+    const call = await h.tg.waitFor(c => c.method === 'editMessageText' && c.params.text === '<b>Task 4</b>: developing')
+    expect(call.params).toMatchObject({ chat_id: G, message_id: ref.message_id, parse_mode: 'HTML' })
+
+    h.tg.reject('editMessageText', 'message is not modified: specified new message content and reply markup are exactly the same')
+    expect(await edit('<b>Task 4</b>: developing')).toEqual({ ok: true, unchanged: true })
+
+    h.tg.reject('editMessageText', "can't parse entities: Can't find end tag corresponding to start tag \"b\"", p => p.parse_mode === 'HTML')
+    expect(await edit('<b>Task 4: reviewing')).toEqual({ ok: true, plain: true })
+    await h.tg.waitFor(c => c.method === 'editMessageText' && c.params.text === 'Task 4: reviewing' && !c.params.parse_mode)
+
+    h.tg.reject('editMessageText', 'message to edit not found')
+    expect(await edit('PR ready')).toMatchObject({ gone: true, error: expect.stringContaining('message to edit not found') })
+    h.tg.reject('editMessageText', "message can't be edited")
+    expect(await edit('PR ready')).toMatchObject({ gone: true })
+
+    h.tg.reject('editMessageText', 'Too Many Requests: retry after 5')
+    const other = await edit('PR ready')
+    expect('error' in other && !('gone' in other)).toBe(true)
+    expect(await edit('x', { chat_id: '-100777' })).toMatchObject({ error: expect.stringContaining('not allowlisted') })
+    expect(await edit('')).toEqual({ error: 'text required' })
+    expect(await h.hub.post('/notice/edit', { text: 'x' })).toEqual({ error: 'chat_id and message_id required' })
+  })
+
   test('OrchestratorClient: run() receives commands and answers; prompt() posts', async () => {
     orch.close()
     await Bun.sleep(100)
@@ -172,6 +203,10 @@ describe('orchestrator API', () => {
     expect(await ev(events, e => e.type === 'prompt_answer' && e.id === r.id)).toMatchObject({ label: 'OK' })
     expect(await client.ackPrompt(r.id)).toEqual({ ok: true })
     expect(await client.ensureTopic('proj')).toEqual({ chat_id: G, thread_id: thread })
+    const n = await client.notice({ topic: 'proj', text: 'Task 5: analyzing' })
+    if ('error' in n) throw new Error(n.error)
+    expect(await client.editNotice({ ...n.messages[0]!, text: 'Task 5: spec ready' })).toEqual({ ok: true })
+    await h.tg.waitFor(c => c.method === 'editMessageText' && c.params.text === 'Task 5: spec ready')
     client.stop()
   })
 })

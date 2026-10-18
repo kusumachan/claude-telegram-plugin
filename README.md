@@ -315,10 +315,13 @@ The rest of this section is for developers. A separate long-running process on t
 | `POST /prompt` | `{ key?, topic?, text, buttons?, needs_text?, files?, format? }` | `{ id, message_ids }` or `{ error }` |
 | `POST /prompt/ack` | `{ id }` | `{ ok }`: stop re-sending that answer |
 | `POST /prompt/cancel` | `{ id, note? }` | `{ ok }`: buttons removed, `✖️ note` posted under it |
-| `POST /notice` | `{ topic?, text?, files?, format? }` | `{ message_ids }` or `{ error }` |
+| `POST /notice` | `{ topic?, text?, files?, format? }` | `{ message_ids, messages: [{ chat_id, message_id, thread_id? }] }` or `{ error }` |
+| `POST /notice/edit` | `{ chat_id, message_id, text, format? }` (one of the `messages` above) | `{ ok, unchanged?, plain? }` or `{ error, gone? }` |
 | `POST /topic/ensure` | `{ topic }` | `{ chat_id, thread_id }` or `{ error }` |
 
 `topic` is a project key (as in `topics.json`). Without one, or when the topic can't be used, messages go to allowlisted DMs.
+
+Status messages edited in place: keep a ref from `/notice` (it's plain data, so it still works after a restart) and pass it to `/notice/edit` with the new text. "Not modified" counts as success (`unchanged`). If Telegram rejects the markup the text is edited as plain text (`plain`). `gone` means the message was deleted or can't be edited any more, so post a new notice. Without a topic a notice goes to every allowlisted DM, and a ref edits only that one copy.
 
 Gate prompts:
 
