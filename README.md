@@ -94,7 +94,7 @@ Add your bot to the group, then make it an **admin** with the **Manage Topics** 
 In @BotFather send `/setprivacy`, pick your bot and choose **Disable**. Then **remove the bot from the group and add it again** (and make it admin again). Telegram only applies the privacy change when the bot rejoins.
 
 **Step 4. Send `/here` in the group.** 📱
-Send `/here` in the group (the hub must be running, e.g. a `claude-tg` session is open). The bot checks that Topics is on and that it's an admin with Manage Topics. If something is missing, it replies with what to fix, and you send `/here` again. When everything is in place it replies "✅ This group is now the topics group." That does what the two commands below would do, with your user id as `--allow`.
+Send `/here` in the group (the hub must be running, see [When the hub runs](#when-the-hub-runs)). The bot checks that Topics is on and that it's an admin with Manage Topics. If something is missing, it replies with what to fix, and you send `/here` again. When everything is in place it replies "✅ This group is now the topics group." That does what the two commands below would do, with your user id as `--allow`.
 
 Only allowlisted users (paired in Part 1) get an answer. From anyone else the bot ignores `/here`. If a topics group is already set, `/here` in another group doesn't replace it. It tells you to run `/telegram-plus:access set topicsGroup <id>` instead. In a group that's already enabled, `/here` just reports its status.
 
