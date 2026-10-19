@@ -93,18 +93,26 @@ Add your bot to the group, then make it an **admin** with the **Manage Topics** 
 **Step 3. Let the bot see all messages.** 📱
 In @BotFather send `/setprivacy`, pick your bot and choose **Disable**. Then **remove the bot from the group and add it again** (and make it admin again). Telegram only applies the privacy change when the bot rejoins.
 
-**Step 4. Find the group id.** 📱
-It's a negative number starting with `-100`, like `-1001234567890`.
+**Step 4. Send `/here` in the group.** 📱
+Send `/here` in the group (the hub must be running, e.g. a `claude-tg` session is open). The bot checks that Topics is on and that it's an admin with Manage Topics. If something is missing, it replies with what to fix, and you send `/here` again. When everything is in place it replies "✅ This group is now the topics group." That does what the two commands below would do, with your user id as `--allow`.
+
+Only allowlisted users (paired in Part 1) get an answer. From anyone else the bot ignores `/here`. If a topics group is already set, `/here` in another group doesn't replace it. It tells you to run `/telegram-plus:access set topicsGroup <id>` instead. In a group that's already enabled, `/here` just reports its status.
+
+<details>
+<summary>Or do it from Claude Code, with the group id</summary>
+
+Find the group id. It's a negative number starting with `-100`, like `-1001234567890`.
 - [Telegram Web](https://web.telegram.org/a): open the group; the id is in the address bar after `#`. If it shows `-123…` without the `100`, put `-100` in front of the digits.
 - Telegram Desktop: Settings → Advanced → Experimental settings → turn on "Show Peer IDs in Profile", then open the group's profile.
 
-**Step 5. Tell the plugin about the group.** 🤖
-Replace the group id and your Telegram user id (from Part 1, "Check it"):
+Then, with the group id and your Telegram user id (from Part 1, "Check it"): 🤖
 ```
 /telegram-plus:access group add -1001234567890 --no-mention --allow 412587349
 /telegram-plus:access set topicsGroup -1001234567890
 ```
 `--no-mention` lets you write without @mentioning the bot. `--allow` makes sure only you can talk to Claude in that group.
+
+</details>
 
 **Check it.** 💻 Start `claude-tg` in a project and ask it to run a shell command. Its approval prompt is the first thing sent to the project, so a topic named after the project folder appears in the group with a welcome message, and the prompt goes there. Write in that topic and Claude answers there.
 

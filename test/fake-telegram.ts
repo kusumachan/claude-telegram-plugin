@@ -13,6 +13,10 @@ export class FakeTelegram {
   private nextThreadId = 500
   /** Forum topics the "user" deleted: posting there fails like real Telegram. */
   deletedThreads = new Set<number>()
+  /** Groups with Topics off: their messages carry no is_forum. */
+  nonForumChats = new Set<number>()
+  /** What getChatMember returns for the bot itself. */
+  botMember: Record<string, any> = { status: 'administrator', can_manage_topics: true }
   /** One-shot failures: the next call to `method` (matching `when`) gets a 400 with this description. */
   private rejects: { method: string; description: string; when?: (params: Record<string, any>) => boolean }[] = []
   private server: ReturnType<typeof Bun.serve>
@@ -85,6 +89,8 @@ export class FakeTelegram {
     switch (method) {
       case 'getMe':
         return { id: 1, is_bot: true, first_name: 'Bot', username: 'test_bot' }
+      case 'getChatMember':
+        return { user: { id: params.user_id, is_bot: true, first_name: 'Bot' }, ...this.botMember }
       case 'createForumTopic':
         return { message_thread_id: this.nextThreadId++, name: params.name, icon_color: 0 }
       case 'sendDocument':
@@ -134,7 +140,7 @@ export class FakeTelegram {
       message: {
         message_id: messageId,
         date: Math.floor(Date.now() / 1000),
-        chat: { id: chatId, type: 'supergroup', title: 'Claude', is_forum: true },
+        chat: { id: chatId, type: 'supergroup', title: 'Claude', ...(this.nonForumChats.has(chatId) ? {} : { is_forum: true }) },
         from: { id: userId, is_bot: false, first_name: 'User', username: `user${userId}` },
         text,
         ...(text.startsWith('/') ? { entities: [{ type: 'bot_command', offset: 0, length: text.split(' ')[0]!.length }] } : {}),
