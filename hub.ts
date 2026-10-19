@@ -104,8 +104,6 @@ const typing = new TypingTracker((chatId, threadId) =>
 )
 const router = new Router()
 const topics = new TopicStore(STATE_DIR)
-/** session id → its forum topic thread id, while connected. */
-const sessionTopics = new Map<string, number>()
 /** topic name → when creating/using it last failed (backoff, avoids log spam). */
 const topicFailures = new Map<string, number>()
 const TOPIC_RETRY_MS = 10 * 60 * 1000
@@ -897,14 +895,13 @@ async function handle(req: Request): Promise<Response> {
             if (!push(id, { type: 'ping' })) clearInterval(ping)
           }, 20_000)
           log(`session connected: ${info.name} (${cwd})`)
+          // No topic yet: it's made when something is first sent there, or by POST /topic/ensure.
           if (isControlTopic(store.load(), info.name)) log(`"${info.name}" is the orchestrator's control topic — this session gets no topic`)
-          else void topicFor(info.name).then(t => { if (t) sessionTopics.set(id, t.threadId) })
         },
         cancel() {
           clearInterval(ping)
           if (streams.get(id)) {
             streams.delete(id)
-            sessionTopics.delete(id)
             router.remove(id)
             log(`session disconnected: ${info.name}`)
           }
@@ -929,8 +926,9 @@ async function handle(req: Request): Promise<Response> {
       const a = { ...(args ?? {}) }
       // With several sessions on one bot, say who's talking — except in the
       // session's own topic, where it's obvious.
-      const ownTopic = sessionTopics.get(session)
-      const inOwnTopic = ownTopic != null && a.chat_id === topicsGroupId() && Number(a.thread_id) === ownTopic
+      const group = topicsGroupId()
+      const ownTopic = group && !isControlTopic(store.load(), info.name) ? topics.get(group, info.name) : undefined
+      const inOwnTopic = ownTopic != null && a.chat_id === group && Number(a.thread_id) === ownTopic
       if (name === 'reply' && router.size > 1 && !inOwnTopic && typeof a.text === 'string' && a.text) {
         a.text = sessionPrefix(info.name, a.format) + a.text
       }
@@ -1012,7 +1010,6 @@ async function handle(req: Request): Promise<Response> {
             if (!push(`inbox:${p.id}`, { type: 'ping' })) clearInterval(ping)
           }, 20_000)
           log(`inbox session connected: ${p.name} (topic ${s.topic || 'none'})`)
-          if (s.topic) void topicFor(s.topic) // so the owner has somewhere to write
         },
         cancel() {
           clearInterval(ping)

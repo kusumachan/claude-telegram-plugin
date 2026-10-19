@@ -106,7 +106,7 @@ Replace the group id and your Telegram user id (from Part 1, "Check it"):
 ```
 `--no-mention` lets you write without @mentioning the bot. `--allow` makes sure only you can talk to Claude in that group.
 
-**Check it.** 💻 Start `claude-tg` in a project. A topic named after the project folder appears in the group with a welcome message. Write in that topic and Claude answers there.
+**Check it.** 💻 Start `claude-tg` in a project and ask it to run a shell command. Its approval prompt is the first thing sent to the project, so a topic named after the project folder appears in the group with a welcome message, and the prompt goes there. Write in that topic and Claude answers there.
 
 If no topic appears, look at the end of `~/.claude/channels/telegram-plus/hub.log`. The usual cause is that the bot isn't an admin with Manage Topics, or Topics is off. Until it's fixed, everything goes to your DM.
 
@@ -194,8 +194,9 @@ Instead of switching with `/use`, every project gets its own topic in a Telegram
 
 What happens:
 
-- When a channel session connects, the hub creates a topic named after it, or reuses the existing one (`<state-dir>/topics.json`). Messages in that topic always go to that session. If it isn't running, the bot says so.
-- Approval prompts and notices from any session (including `claude --bg` workers and worktrees) go to their project's topic, created on first use. Only allowlisted users can tap Allow/Deny there.
+- A project's topic is created the first time something is sent to it (a notice, question or approval prompt), or when the orchestrator asks for it with `POST /topic/ensure`. Connecting a session never creates one, so a session that never sends anything leaves no empty topic behind. Topics are remembered in `<state-dir>/topics.json` and reused.
+- A channel session uses the topic named after it. Messages in that topic always go to that session. If it isn't running, the bot says so.
+- Approval prompts and notices from any session (including `claude --bg` workers and worktrees) go to their project's topic. Only allowlisted users can tap Allow/Deny there.
 - Replies in a session's own topic skip the `[name]` prefix.
 - If the bot can't create topics (no admin rights, Topics off), it logs why in `hub.log` and falls back to DMs. A topic deleted in Telegram is recreated as soon as something is sent to it, and the message goes to the new topic.
 

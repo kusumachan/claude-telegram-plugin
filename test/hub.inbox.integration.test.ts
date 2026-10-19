@@ -41,9 +41,12 @@ beforeAll(async () => {
 afterAll(() => h.stop())
 
 describe('owner-message inbox', () => {
-  test('an inbox session gets its project topic; a message there is queued (👀) and delivered after a tool call (👍)', async () => {
+  test('connecting makes no topic; once it exists, a message there is queued (👀) and delivered after a tool call (👍)', async () => {
     agentA = h.connectInbox('sess-A', 'proj-1A', 'proj')
     await h.waitEvent(agentA.events, e => e.type === 'hello')
+    await Bun.sleep(200)
+    expect(h.tg.calls.some(c => c.method === 'createForumTopic')).toBe(false)
+    await h.hub.post('/topic/ensure', { topic: 'proj' })
     const welcome = await h.tg.waitFor(c => c.method === 'sendMessage' && c.params.text?.startsWith('📦 proj —'))
     thread = welcome.params.message_thread_id
 

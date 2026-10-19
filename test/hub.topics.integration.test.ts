@@ -1,6 +1,7 @@
 /**
- * Forum topics: each channel session gets its own topic in the topics group,
- * messages there route to that session, approvals go to the project's topic.
+ * Forum topics: each channel session gets its own topic in the topics group
+ * (made when something is first sent there, not on connect), messages there
+ * route to that session, approvals go to the project's topic.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import type { HookPermissionResult } from '../src/hub/client.ts'
@@ -39,18 +40,23 @@ async function createdThread(name: string): Promise<number> {
 }
 
 describe('hub with forum topics', () => {
-  test('a connecting session gets its own topic with a welcome message', async () => {
+  test('connecting makes no topic; /topic/ensure makes it with a welcome message', async () => {
     api = h.connect('session-api', 'api')
     await h.waitEvent(api.events, e => e.type === 'hello')
+    await Bun.sleep(200)
+    expect(h.tg.calls.some(c => c.method === 'createForumTopic')).toBe(false)
+    await h.hub.post('/topic/ensure', { topic: 'api' })
     const create = await h.tg.waitFor(c => c.method === 'createForumTopic' && c.params.name === 'api')
     expect(create.params.chat_id).toBe(G)
     expect(await createdThread('api')).toBeGreaterThan(0)
   })
 
-  test('messages in a session\'s topic go to it, even with another session active', async () => {
+  test('the first notice to a project makes its topic; messages there go to its session', async () => {
     web = h.connect('session-web', 'web')
     await h.waitEvent(web.events, e => e.type === 'hello')
-    await createdThread('web')
+    await h.hub.post('/notice', { topic: 'web', text: 'build started' })
+    const thread = await createdThread('web')
+    await h.tg.waitFor(c => c.method === 'sendMessage' && c.params.text === 'build started' && c.params.message_thread_id === thread)
     h.tg.groupMsg(USER, GROUP, 'hi api', topicThread('api'))
     h.tg.groupMsg(USER, GROUP, 'hi web', topicThread('web'))
     const e = await h.waitEvent(api.events, inbound('hi api'))
@@ -126,5 +132,13 @@ describe('hub with forum topics', () => {
     h.tg.groupMsg(USER, GROUP, 'welcome back', topicThread('api'))
     await h.waitEvent(api.events, inbound('welcome back'))
     expect(h.tg.calls.filter(c => c.method === 'createForumTopic' && c.params.name === 'api').length).toBe(before)
+  })
+
+  test('a session connecting to an existing topic is mapped to it (no [name] prefix there)', async () => {
+    await h.hub.post('/tool', {
+      session: 'session-api-2', name: 'reply',
+      args: { chat_id: G, thread_id: String(topicThread('api')), text: 'still mine' },
+    })
+    await h.tg.waitFor(c => c.method === 'sendMessage' && c.params.text === 'still mine')
   })
 })
