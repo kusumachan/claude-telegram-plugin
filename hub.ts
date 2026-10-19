@@ -831,6 +831,52 @@ bot.callbackQuery(/^use:(.+)$/, async ctx => {
   await ctx.editMessageText(`Talking to ${session.name}.`).catch(() => {})
 })
 
+// --- /here: make this group the topics group, from Telegram -------------------
+
+/** What's missing for this chat to work as the topics group (empty: nothing). */
+async function topicsGroupProblems(ctx: Context): Promise<string[]> {
+  const problems: string[] = []
+  if (!ctx.chat || !('is_forum' in ctx.chat) || !ctx.chat.is_forum) problems.push('Turn on Topics in the group settings.')
+  const me = await ctx.getChatMember(ctx.me.id).catch(() => undefined)
+  const canManage = me?.status === 'creator' || (me?.status === 'administrator' && me.can_manage_topics)
+  if (!canManage) problems.push('Make me an admin with Manage Topics.')
+  return problems
+}
+
+// Works in groups the gate doesn't know yet (that's the point), so only
+// allowlisted senders get any answer; everyone else is dropped silently.
+bot.command('here', async ctx => {
+  if (!ctx.from || !ctx.chat || !ctx.message) return
+  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') return
+  const access = store.load()
+  const senderId = String(ctx.from.id)
+  if (access.dmPolicy === 'disabled' || !access.allowFrom.includes(senderId)) return
+  const chatId = String(ctx.chat.id)
+  const thread = ctx.message.is_topic_message ? ctx.message.message_thread_id : undefined
+  const say = (text: string) => ctx.reply(text, thread != null ? { message_thread_id: thread } : {}).catch(() => {})
+  const change = `To change it, run in Claude Code: /telegram-plus:access set topicsGroup ${chatId}`
+  const problems = await topicsGroupProblems(ctx)
+  const fix = problems.length ? `\n\nTo fix:\n${problems.map(p => `• ${p}`).join('\n')}` : ''
+
+  if (chatId in access.groups) {
+    if (access.topicsGroup === chatId) return void say(`✅ This group is the topics group.${fix}`)
+    return void say(`This group is enabled, but it isn't the topics group (${access.topicsGroup ? `that's ${access.topicsGroup}` : 'none is set'}).\n${change}${fix}`)
+  }
+  if (problems.length) return void say(`This group can't be the topics group yet.${fix}\n\nThen send /here again.`)
+  if (store.isStatic) return void say('Access is in static mode, so I can\'t change it from here. Edit access.json instead.')
+
+  const result = store.update(a => {
+    if (a.topicsGroup && a.topicsGroup !== chatId) return { taken: a.topicsGroup }
+    a.groups[chatId] = { requireMention: false, allowFrom: [senderId] }
+    a.topicsGroup = chatId
+    return { taken: undefined }
+  })
+  if (result.taken) return void say(`A topics group is already set (${result.taken}), so I left this one alone.\n${change}`)
+  log(`/here: ${chatId} is now the topics group (by ${senderId})`)
+  await say('✅ This group is now the topics group.')
+  if (streams.has(ORCHESTRATOR_STREAM)) void topicFor(controlTopic(store.load())) // it connected before there was a group
+})
+
 registerInbound({
   bot,
   store,
@@ -1234,6 +1280,7 @@ void (async () => {
           ).catch(() => {})
           void bot.api.setMyCommands(
             [
+              { command: 'here', description: 'Make this group the topics group' },
               { command: 'task', description: 'New task for this project: /task <request>' },
               { command: 'queue', description: "Show the orchestrator's task queue" },
               { command: 'level', description: 'Set the autonomy level: /level <0|1|2>' },

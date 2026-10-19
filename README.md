@@ -93,18 +93,26 @@ Add your bot to the group, then make it an **admin** with the **Manage Topics** 
 **Step 3. Let the bot see all messages.** 📱
 In @BotFather send `/setprivacy`, pick your bot and choose **Disable**. Then **remove the bot from the group and add it again** (and make it admin again). Telegram only applies the privacy change when the bot rejoins.
 
-**Step 4. Find the group id.** 📱
-It's a negative number starting with `-100`, like `-1001234567890`.
+**Step 4. Send `/here` in the group.** 📱
+Send `/here` in the group (the hub must be running, see [When the hub runs](#when-the-hub-runs)). The bot checks that Topics is on and that it's an admin with Manage Topics. If something is missing, it replies with what to fix, and you send `/here` again. When everything is in place it replies "✅ This group is now the topics group." That does what the two commands below would do, with your user id as `--allow`.
+
+Only allowlisted users (paired in Part 1) get an answer. From anyone else the bot ignores `/here`. If a topics group is already set, `/here` in another group doesn't replace it. It tells you to run `/telegram-plus:access set topicsGroup <id>` instead. In a group that's already enabled, `/here` just reports its status.
+
+<details>
+<summary>Or do it from Claude Code, with the group id</summary>
+
+Find the group id. It's a negative number starting with `-100`, like `-1001234567890`.
 - [Telegram Web](https://web.telegram.org/a): open the group; the id is in the address bar after `#`. If it shows `-123…` without the `100`, put `-100` in front of the digits.
 - Telegram Desktop: Settings → Advanced → Experimental settings → turn on "Show Peer IDs in Profile", then open the group's profile.
 
-**Step 5. Tell the plugin about the group.** 🤖
-Replace the group id and your Telegram user id (from Part 1, "Check it"):
+Then, with the group id and your Telegram user id (from Part 1, "Check it"): 🤖
 ```
 /telegram-plus:access group add -1001234567890 --no-mention --allow 412587349
 /telegram-plus:access set topicsGroup -1001234567890
 ```
 `--no-mention` lets you write without @mentioning the bot. `--allow` makes sure only you can talk to Claude in that group.
+
+</details>
 
 **Check it.** 💻 Start `claude-tg` in a project and ask it to run a shell command. Its approval prompt is the first thing sent to the project, so a topic named after the project folder appears in the group with a welcome message, and the prompt goes there. Write in that topic and Claude answers there.
 
@@ -144,12 +152,25 @@ flowchart LR
     HUB <--> API["channel session 'api'<br/>claude-tg in ~/code/api"]
     HUB <--> WEB["channel session 'web'<br/>claude-tg in ~/code/web"]
     HUB <--> ORC["claude-orchestrator<br/>(optional)"]
-    OTHER["any other session<br/>plain claude"] -- "approvals, notices,<br/>ask_owner, inbox" --> HUB
+    HUB <--> INB["inbox session<br/>TELEGRAM_PLUS_INBOX=1 claude"]
+    OTHER["plain claude session"] -- "approvals, ask_owner" --> HUB
+    OTHER -- "notices, reply/react tools<br/>(Bot API directly, no hub)" --> TG
 ```
 
-- **The hub** (`hub.ts`) is the only process that talks to Telegram's `getUpdates`, so any number of sessions can share one bot without 409 conflicts. It starts automatically the first time something needs it and exits after 10 minutes with nothing connected. Log: `<state-dir>/hub.log`.
+- **The hub** (`hub.ts`) is the only process that talks to Telegram's `getUpdates`, so any number of sessions can share one bot without 409 conflicts. It's started by the sessions listed below and exits after 10 minutes with nothing connected or pending. Log: `<state-dir>/hub.log`.
 - **Channel sessions** are started with `claude-tg` (or `bin/claude-telegram`). Each registers with the hub under its project folder name (override with `TELEGRAM_PLUS_NAME=...`).
-- **Every other session** with the plugin enabled is tools-only, and gets notifications and Telegram approvals through hooks.
+- **Every other session** with the plugin enabled is tools-only. It sends notices and tool calls straight to the Bot API, and uses the hub only for Telegram approvals and `ask_owner`.
+
+### When the hub runs
+
+The bot only reads messages (pairing codes, `/here`, anything you write) while the hub is running. It runs while one of these is:
+
+- a `claude-tg` channel session,
+- an inbox session (`TELEGRAM_PLUS_INBOX=1 claude`),
+- the orchestrator (claude-orchestrator),
+- briefly, a plain session's approval prompt or `ask_owner` question. The hub starts for it and exits 10 minutes after it's answered and nothing else is connected.
+
+**A plain `claude` session on its own doesn't start the hub.** To pair or send `/here`, have one of the sessions above open first. Without `claude-tg`, `TELEGRAM_PLUS_INBOX=1 claude` is the simplest. If the bot doesn't answer, check that `<state-dir>/hub.log` shows `polling as @yourbot`.
 
 ## Multiple sessions
 

@@ -2,7 +2,7 @@
 
 A Telegram bot is publicly addressable. Anyone who finds its username can DM it, and without a gate those messages would flow straight into your assistant session. The access model described here decides who gets through.
 
-By default, a DM from an unknown sender triggers **pairing**: the bot replies with a 6-character code and drops the message. You run `/telegram-plus:access pair <code>` from your assistant session to approve them. Once approved, their messages pass through.
+By default, a DM from an unknown sender triggers **pairing**: the bot replies with a 6-character code and drops the message. You run `/telegram-plus:access pair <code>` from your assistant session to approve them. Once approved, their messages pass through. The bot only answers while the hub is running, and a plain `claude` session doesn't start it. See [When the hub runs](README.md#when-the-hub-runs).
 
 All changes go through a small CLI (`src/cli.ts`) that shares a lock with the server, so concurrent writes never clobber each other. All state lives in `~/.claude/channels/telegram-plus/access.json`. The `/telegram-plus:access` skill commands edit this file; the server re-reads it on every inbound message, so changes take effect without a restart. Set `TELEGRAM_ACCESS_MODE=static` to pin config to what was on disk at boot (pairing is unavailable in static mode since it requires runtime writes).
 
@@ -77,7 +77,7 @@ In groups with `requireMention: true`, any of the following triggers the bot:
 
 Configure outbound behavior with `/telegram-plus:access set <key> <value>`.
 
-**`notify`** (`on`/`off`), **`notifyStopAfterSeconds`** (default 60, `0` = every turn) and **`notifyPreview`** (`on`/`off`) control the notification hooks. **`approvals`** (`on`/`off`) and **`approvalTimeoutSeconds`** (10–540, default 300) control approving permission prompts from Telegram. **`askTimeoutMinutes`** (1–720, default 240) is how long one `ask_owner` call waits before returning "no answer yet" (the question stays open). **`topicsGroup`** (a `-100…` group already added with `group add`) gives every project its own forum topic; `set topicsGroup ""` turns it off. **`orchestratorTopic`** (default `Orchestrator`) is the key of the orchestrator's control topic. `set orchestratorTopic ""` resets it. See the README.
+**`notify`** (`on`/`off`), **`notifyStopAfterSeconds`** (default 60, `0` = every turn) and **`notifyPreview`** (`on`/`off`) control the notification hooks. **`approvals`** (`on`/`off`) and **`approvalTimeoutSeconds`** (10–540, default 300) control approving permission prompts from Telegram. **`askTimeoutMinutes`** (1–720, default 240) is how long one `ask_owner` call waits before returning "no answer yet" (the question stays open). **`topicsGroup`** (a `-100…` group already added with `group add`) gives every project its own forum topic. An allowlisted user can also set it by sending `/here` in the group, which adds the group as `group add <id> --no-mention --allow <their id>` would, once Topics is on and the bot is an admin with Manage Topics. `/here` never replaces a topicsGroup that's already set; `set topicsGroup ""` turns it off. **`orchestratorTopic`** (default `Orchestrator`) is the key of the orchestrator's control topic. `set orchestratorTopic ""` resets it. See the README.
 
 **`maxPending`** caps how many pairing codes can be outstanding at once (default 10). Each stranger holds at most one code for 1h.
 
