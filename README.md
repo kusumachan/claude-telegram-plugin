@@ -152,12 +152,25 @@ flowchart LR
     HUB <--> API["channel session 'api'<br/>claude-tg in ~/code/api"]
     HUB <--> WEB["channel session 'web'<br/>claude-tg in ~/code/web"]
     HUB <--> ORC["claude-orchestrator<br/>(optional)"]
-    OTHER["any other session<br/>plain claude"] -- "approvals, notices,<br/>ask_owner, inbox" --> HUB
+    HUB <--> INB["inbox session<br/>TELEGRAM_PLUS_INBOX=1 claude"]
+    OTHER["plain claude session"] -- "approvals, ask_owner" --> HUB
+    OTHER -- "notices, reply/react tools<br/>(Bot API directly, no hub)" --> TG
 ```
 
-- **The hub** (`hub.ts`) is the only process that talks to Telegram's `getUpdates`, so any number of sessions can share one bot without 409 conflicts. It starts automatically the first time something needs it and exits after 10 minutes with nothing connected. Log: `<state-dir>/hub.log`.
+- **The hub** (`hub.ts`) is the only process that talks to Telegram's `getUpdates`, so any number of sessions can share one bot without 409 conflicts. It's started by the sessions listed below and exits after 10 minutes with nothing connected or pending. Log: `<state-dir>/hub.log`.
 - **Channel sessions** are started with `claude-tg` (or `bin/claude-telegram`). Each registers with the hub under its project folder name (override with `TELEGRAM_PLUS_NAME=...`).
-- **Every other session** with the plugin enabled is tools-only, and gets notifications and Telegram approvals through hooks.
+- **Every other session** with the plugin enabled is tools-only. It sends notices and tool calls straight to the Bot API, and uses the hub only for Telegram approvals and `ask_owner`.
+
+### When the hub runs
+
+The bot only reads messages (pairing codes, `/here`, anything you write) while the hub is running. It runs while one of these is:
+
+- a `claude-tg` channel session,
+- an inbox session (`TELEGRAM_PLUS_INBOX=1 claude`),
+- the orchestrator (claude-orchestrator),
+- briefly, a plain session's approval prompt or `ask_owner` question. The hub starts for it and exits 10 minutes after it's answered and nothing else is connected.
+
+**A plain `claude` session on its own doesn't start the hub.** To pair or send `/here`, have one of the sessions above open first. Without `claude-tg`, `TELEGRAM_PLUS_INBOX=1 claude` is the simplest. If the bot doesn't answer, check that `<state-dir>/hub.log` shows `polling as @yourbot`.
 
 ## Multiple sessions
 

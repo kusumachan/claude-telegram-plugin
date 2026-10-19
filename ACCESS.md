@@ -2,7 +2,7 @@
 
 A Telegram bot is publicly addressable. Anyone who finds its username can DM it, and without a gate those messages would flow straight into your assistant session. The access model described here decides who gets through.
 
-By default, a DM from an unknown sender triggers **pairing**: the bot replies with a 6-character code and drops the message. You run `/telegram-plus:access pair <code>` from your assistant session to approve them. Once approved, their messages pass through.
+By default, a DM from an unknown sender triggers **pairing**: the bot replies with a 6-character code and drops the message. You run `/telegram-plus:access pair <code>` from your assistant session to approve them. Once approved, their messages pass through. The bot only answers while the hub is running, and a plain `claude` session doesn't start it. See [When the hub runs](README.md#when-the-hub-runs).
 
 All changes go through a small CLI (`src/cli.ts`) that shares a lock with the server, so concurrent writes never clobber each other. All state lives in `~/.claude/channels/telegram-plus/access.json`. The `/telegram-plus:access` skill commands edit this file; the server re-reads it on every inbound message, so changes take effect without a restart. Set `TELEGRAM_ACCESS_MODE=static` to pin config to what was on disk at boot (pairing is unavailable in static mode since it requires runtime writes).
 
