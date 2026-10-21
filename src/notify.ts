@@ -43,6 +43,22 @@ export const ATTENTION_TYPES = new Set([
   'agent_needs_input',
 ])
 
+/**
+ * Per-session switch, read from the session's environment: `attention` keeps
+ * only the notices that mean the session is stuck (permission, question),
+ * `off` sends none. For sessions another program already reports on, like
+ * the orchestrator's agents. Unset, or anything else, sends everything.
+ */
+export const NOTIFY_ENV = 'TELEGRAM_PLUS_NOTIFY'
+export type NotifyScope = 'all' | 'attention' | 'off'
+
+export function notifyScope(env: NodeJS.ProcessEnv = process.env): NotifyScope {
+  const v = env[NOTIFY_ENV]?.trim().toLowerCase()
+  if (v === 'attention') return 'attention'
+  if (v === 'off' || v === '0' || v === 'false') return 'off'
+  return 'all'
+}
+
 export function notifyEnabled(access: Access): boolean {
   return access.notify !== 'off' && access.allowFrom.length > 0 && access.dmPolicy !== 'disabled'
 }
@@ -80,7 +96,7 @@ export type Decision =
  * Decide what (if anything) to send for one hook event, and how the
  * per-session state changes.
  */
-export function decide(input: HookInput, access: Access, state: SessionState, now = Date.now()): Decision {
+export function decide(input: HookInput, access: Access, state: SessionState, now = Date.now(), scope: NotifyScope = 'all'): Decision {
   const label = projectLabel(input.cwd)
 
   switch (input.hook_event_name) {
@@ -90,6 +106,9 @@ export function decide(input: HookInput, access: Access, state: SessionState, no
     case 'Notification': {
       const type = input.notification_type ?? ''
       if (!ATTENTION_TYPES.has(type)) return { send: false, reason: `ignored type ${type}` }
+      if (scope === 'off') return { send: false, reason: 'notices off for this session' }
+      // Idle between turns is the normal state of a session someone else drives.
+      if (type === 'idle_prompt' && scope === 'attention') return { send: false, reason: 'idle notices off for this session' }
       // With approvals on, the PermissionRequest hook already sent buttons.
       if (type === 'permission_prompt' && access.approvals !== 'off') {
         return { send: false, reason: 'approval prompt sent instead' }
@@ -104,6 +123,7 @@ export function decide(input: HookInput, access: Access, state: SessionState, no
 
     case 'Stop': {
       if (input.stop_hook_active) return { send: false, reason: 'continuing from another stop hook' }
+      if (scope !== 'all') return { send: false, reason: 'finished notices off for this session' }
       const threshold = (access.notifyStopAfterSeconds ?? DEFAULT_STOP_AFTER_SECONDS) * 1000
       const elapsed = state.turnStart != null ? now - state.turnStart : undefined
       if (threshold > 0 && (elapsed == null || elapsed < threshold)) {

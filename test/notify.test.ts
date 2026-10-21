@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { type Access, defaultAccess } from '../src/access.ts'
-import { decide, formatDuration, type HookInput, notifyEnabled, projectLabel, readSessionState, writeSessionState } from '../src/notify.ts'
+import { decide, formatDuration, type HookInput, notifyEnabled, notifyScope, projectLabel, readSessionState, writeSessionState } from '../src/notify.ts'
 
 const access: Access = { ...defaultAccess(), allowFrom: ['1'] }
 const base = { session_id: 's1', cwd: '/home/me/code/api' }
@@ -64,6 +64,26 @@ describe('decide', () => {
   test('uninteresting notification types are ignored', () => {
     expect(decide({ ...base, hook_event_name: 'Notification', notification_type: 'auth_success' }, access, {}, T0).send).toBe(false)
   })
+
+  test('scope attention keeps permission and question notices, drops finished and idle', () => {
+    const stop: HookInput = { ...base, hook_event_name: 'Stop', last_assistant_message: 'Done' }
+    const idle: HookInput = { ...base, hook_event_name: 'Notification', notification_type: 'idle_prompt' }
+    const perm: HookInput = { ...base, hook_event_name: 'Notification', notification_type: 'permission_prompt', title: 'Permission needed' }
+    const ask: HookInput = { ...base, hook_event_name: 'Notification', notification_type: 'elicitation_dialog' }
+    const off = { ...access, approvals: 'off' as const }
+    expect(decide(stop, off, { turnStart: T0 }, T0 + 120_000, 'attention').send).toBe(false)
+    expect(decide(idle, off, {}, T0, 'attention').send).toBe(false)
+    expect(decide(perm, off, {}, T0, 'attention').send).toBe(true)
+    expect(decide(ask, off, {}, T0, 'attention').send).toBe(true)
+    // The turn start is still recorded.
+    expect(decide({ ...base, hook_event_name: 'UserPromptSubmit' }, off, {}, T0, 'attention').state?.turnStart).toBe(T0)
+  })
+
+  test('scope off sends nothing', () => {
+    const off = { ...access, approvals: 'off' as const }
+    expect(decide({ ...base, hook_event_name: 'Stop' }, off, { turnStart: T0 }, T0 + 120_000, 'off').send).toBe(false)
+    expect(decide({ ...base, hook_event_name: 'Notification', notification_type: 'permission_prompt' }, off, {}, T0, 'off').send).toBe(false)
+  })
 })
 
 describe('helpers', () => {
@@ -76,6 +96,14 @@ describe('helpers', () => {
   test('formatDuration', () => {
     expect(formatDuration(42_000)).toBe('42s')
     expect(formatDuration(3_725_000)).toBe('1h 2m')
+  })
+
+  test('notifyScope reads TELEGRAM_PLUS_NOTIFY', () => {
+    expect(notifyScope({})).toBe('all')
+    expect(notifyScope({ TELEGRAM_PLUS_NOTIFY: 'Attention' })).toBe('attention')
+    expect(notifyScope({ TELEGRAM_PLUS_NOTIFY: 'off' })).toBe('off')
+    expect(notifyScope({ TELEGRAM_PLUS_NOTIFY: '0' })).toBe('off')
+    expect(notifyScope({ TELEGRAM_PLUS_NOTIFY: 'on' })).toBe('all')
   })
 
   test('notifyEnabled needs someone to notify', () => {

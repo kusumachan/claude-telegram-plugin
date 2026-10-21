@@ -16,6 +16,7 @@ import {
   decide,
   type HookInput,
   notifyEnabled,
+  notifyScope,
   pruneSessionState,
   readSessionState,
   writeSessionState,
@@ -49,7 +50,7 @@ async function main(): Promise<void> {
   if (!notifyEnabled(access)) return
 
   const state = readSessionState(STATE_DIR, input.session_id)
-  const decision = decide(input, access, state)
+  const decision = decide(input, access, state, Date.now(), notifyScope())
   if (decision.state) writeSessionState(STATE_DIR, input.session_id, decision.state)
   if (input.hook_event_name === 'UserPromptSubmit') pruneSessionState(STATE_DIR)
   if (decision.send) await sendNotice(token, access, sessionTopic(input.cwd), decision.text)
