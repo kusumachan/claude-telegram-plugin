@@ -18,24 +18,29 @@ export function inboxEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 export type InboxMessage = {
+  /** Empty for a relayed message, which has no Telegram message behind it. */
   chatId: string
   messageId: number
   threadId?: number
   text: string
   by: string
+  /** Sent through POST /inbox/send by the orchestrator (src/hub/orchestrator.ts), not typed by the owner; `by` names the sender. */
+  relayed?: true
   at: number
 }
 
 /** Wire types between the MCP server / hooks and the hub. */
 export type InboxConnectBody = { id: string; name: string; topic: string; cwd: string }
 export type InboxTakeBody = { session_id: string }
-export type InboxTakeResult = { messages: { text: string; by: string }[] }
+export type InboxTakeResult = { messages: { text: string; by: string; relayed?: true }[] }
 
 /** What the model sees, oldest first. */
-export function formatInbox(messages: { text: string; by: string }[]): string {
-  if (messages.length === 1) return `Message from the owner on Telegram (${messages[0]!.by}):\n${messages[0]!.text}`
-  const lines = messages.map((m, i) => `[${i + 1}] ${m.text}`)
-  return `${messages.length} messages from the owner on Telegram (${messages[0]!.by}), oldest first:\n${lines.join('\n')}`
+export function formatInbox(messages: { text: string; by: string; relayed?: true }[]): string {
+  const from = (m: { by: string; relayed?: true }) => (m.relayed ? m.by : `the owner on Telegram (${m.by})`)
+  if (messages.length === 1) return `Message from ${from(messages[0]!)}:\n${messages[0]!.text}`
+  const one = new Set(messages.map(from)).size === 1
+  const lines = messages.map((m, i) => `[${i + 1}] ${one ? '' : `(${from(m)}) `}${m.text}`)
+  return `${messages.length} messages${one ? ` from ${from(messages[0]!)}` : ''}, oldest first:\n${lines.join('\n')}`
 }
 
 /** Hook stdout that delivers `text`, or undefined when this event can't carry it. */
