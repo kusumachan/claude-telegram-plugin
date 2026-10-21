@@ -342,7 +342,7 @@ The rest of this section is for developers. A separate long-running process on t
 
 | Endpoint | Body | Returns |
 | --- | --- | --- |
-| `POST /orchestrator/connect` | `{}` | NDJSON stream: `hello`, `ping`, `command`, `message`, `prompt_answer`, `question` (held `ask_owner` questions, sent again on reconnect). One orchestrator at a time: the newest connection wins. |
+| `POST /orchestrator/connect` | `{}` | NDJSON stream: `hello`, `ping`, `command`, `message`, `prompt_answer`, `question` (held `ask_owner` questions, sent again on reconnect), `agent_message` (a copy of what the owner wrote to an inbox session, while connected). One orchestrator at a time: the newest connection wins. |
 | `POST /prompt` | `{ key?, topic?, text, buttons?, needs_text?, files?, format? }` | `{ id, message_ids }` or `{ error }` |
 | `POST /prompt/ack` | `{ id }` | `{ ok }`: stop re-sending that answer |
 | `POST /prompt/cancel` | `{ id, note? }` | `{ ok }`: buttons removed, `✖️ note` posted under it |

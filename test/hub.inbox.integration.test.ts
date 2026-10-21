@@ -139,6 +139,19 @@ describe('owner-message inbox', () => {
     expect(formatInbox([{ text: 'stop', by: "the orchestrator's lead", relayed: true }])).toBe("Message from the orchestrator's lead:\nstop")
   })
 
+  test('with an orchestrator connected, it gets a copy of what the owner tells an agent (not of relayed messages)', async () => {
+    const orch = h.connectOrchestrator()
+    await h.waitEvent(orch.events, e => e.type === 'hello')
+    await h.hub.post<InboxSendResult>('/inbox/send', { name: 'proj-1A', text: 'relayed', by: 'lead' })
+    const m = h.tg.groupMsg(USER, GROUP, 'use the users table', thread)
+    await reacted(m, '👀')
+    const copy = await h.waitEvent(orch.events, (e: any) => e.type === 'agent_message') as any
+    expect(copy).toMatchObject({ name: 'proj-1A', topic: 'proj', text: 'use the users table', by: '@user42' })
+    expect(orch.events.filter((e: any) => e.type === 'agent_message')).toHaveLength(1)
+    await take('sess-A')
+    orch.close()
+  })
+
   test('attachments are refused; strangers are not queued', async () => {
     h.tg.groupDocument(USER, GROUP, 'see attached', thread)
     await h.tg.waitFor(c => c.method === 'sendMessage' && /Attachments aren't supported for agents/.test(c.params.text))

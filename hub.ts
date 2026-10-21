@@ -475,6 +475,8 @@ async function queueForInbox(n: ChannelNotification): Promise<boolean> {
   target.queue.push({ chatId, messageId: Number(meta.message_id), threadId: thread, text: n.content, by, at: Date.now() })
   if (!meta.button_choice) void react(chatId, Number(meta.message_id), '👀') // queued
   log(`queued a message for ${target.name} (${target.queue.length} waiting)`)
+  // The orchestrator's lead keeps up with what the owner tells its agents. Not kept if it isn't connected.
+  toOrchestrator({ type: 'agent_message', name: target.name, topic: target.topic, text: n.content, by, at: Date.now() })
   return true
 }
 
