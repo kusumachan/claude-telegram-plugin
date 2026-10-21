@@ -18,6 +18,7 @@ import { join } from 'path'
 import { Bot, GrammyError, InlineKeyboard, type Context } from 'grammy'
 import { AccessStore, type Access } from './src/access.ts'
 import {
+  ASK_HOLD_MS,
   type AskBody,
   type AskResult,
   type AskWaitBody,
@@ -34,6 +35,8 @@ import { buildKeyboard } from './src/buttons.ts'
 import { type InboxConnectBody, type InboxMessage, type InboxTakeBody, type InboxTakeResult } from './src/inbox.ts'
 import {
   type EditNoticeBody,
+  type AskAnswerBody,
+  type AskPostBody,
   type EditNoticeResult,
   type InboxSendBody,
   type InboxSendResult,
@@ -252,6 +255,8 @@ async function requestApproval(req: PermissionRequest, name: string | undefined,
 // --- questions (ask_owner) -----------------------------------------------------
 
 const questions = new QuestionStore(STATE_DIR)
+/** ASK_HOLD_MS; tests shorten it. */
+const HOLD_MS = Number(process.env.TELEGRAM_PLUS_ASK_HOLD_MS) || ASK_HOLD_MS
 /** Question id → ask_owner calls waiting for its answer right now. */
 const askWaiters = new Map<string, Set<() => void>>()
 
@@ -272,7 +277,49 @@ async function postQuestion(body: AskBody, access: Access): Promise<AskResult> {
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) }
   }
-  const text = questionText(body.asker, question, !!rows)
+  // The orchestrator's lead may answer it first: hold it, unless no orchestrator is there to decide.
+  if (body.via === 'orchestrator' && streams.has(ORCHESTRATOR_STREAM)) {
+    const now = Date.now()
+    const q = questions.add({
+      session: body.session, asker: body.asker, question, askedAt: now, messages: [],
+      ...(body.topic ? { topic: body.topic } : {}), ...(rows ? { buttons: rows } : {}), held: { until: now + HOLD_MS },
+    })
+    toOrchestrator(questionEvent(q))
+    log(`question ${q.id} from ${body.asker} held for the orchestrator`)
+    return { id: q.id }
+  }
+  const messages = await sendQuestion(body.asker, question, rows, body.topic, access)
+  if (messages.length === 0) return { error: 'could not post the question to Telegram (see hub.log)' }
+  const q = questions.add({ session: body.session, asker: body.asker, question, askedAt: Date.now(), messages })
+  recordInboxOwner(messages, body.session) // later replies to it reach the asker's inbox
+  log(`question ${q.id} from ${body.asker} posted`)
+  return { id: q.id }
+}
+
+function questionEvent(q: Question): OrchestratorEvent {
+  return {
+    type: 'question', id: q.id, asker: q.asker, question: q.question, at: q.askedAt, until: q.held?.until ?? q.askedAt,
+    ...(q.topic ? { topic: q.topic } : {}), ...(q.buttons ? { buttons: q.buttons } : {}),
+  }
+}
+
+/** Posts a held question (with the orchestrator's note, if any). False if it couldn't be posted. */
+async function releaseQuestion(q: Question, note?: string): Promise<boolean> {
+  const messages = await sendQuestion(q.asker, q.question, q.buttons, q.topic, store.load(), note)
+  if (messages.length === 0) return false
+  questions.release(q.id, messages)
+  recordInboxOwner(messages, q.session)
+  log(`question ${q.id} from ${q.asker} posted${note ? ' with a note' : ''}`)
+  return true
+}
+
+/** Held questions whose time is up are posted, so a question never waits on an orchestrator that's gone. */
+async function releaseOverdue(now = Date.now()): Promise<void> {
+  for (const q of questions.held()) if (q.held!.until <= now) await releaseQuestion(q)
+}
+
+async function sendQuestion(asker: string, question: string, rows: string[][] | undefined, topic: string | undefined, access: Access, note?: string): Promise<QuestionMessage[]> {
+  const text = `${questionText(asker, question, !!rows)}${note?.trim() ? `\n\n🧭 ${note.trim()}` : ''}`
   const send = async (chatId: string, threadId?: number): Promise<QuestionMessage> => {
     const sent = await bot.api.sendMessage(chatId, text, {
       ...(rows ? { reply_markup: buildKeyboard(rows) } : {}),
@@ -282,8 +329,8 @@ async function postQuestion(body: AskBody, access: Access): Promise<AskResult> {
   }
 
   const messages: QuestionMessage[] = []
-  if (body.topic && !isControlTopic(access, body.topic)) {
-    const r = await inTopic(body.topic,
+  if (topic && !isControlTopic(access, topic)) {
+    const r = await inTopic(topic,
       t => send(t.chatId, t.threadId).catch((err: unknown) => ({ error: errorText(err) })),
       r => 'error' in r ? r.error : undefined)
     if (r && !('error' in r)) messages.push(r)
@@ -297,11 +344,7 @@ async function postQuestion(body: AskBody, access: Access): Promise<AskResult> {
       }
     }
   }
-  if (messages.length === 0) return { error: 'could not post the question to Telegram (see hub.log)' }
-  const q = questions.add({ session: body.session, asker: body.asker, question, askedAt: Date.now(), messages })
-  recordInboxOwner(messages, body.session) // later replies to it reach the asker's inbox
-  log(`question ${q.id} from ${body.asker} posted`)
-  return { id: q.id }
+  return messages
 }
 
 /** Show the answer under every copy of the question and drop its buttons. */
@@ -1108,6 +1151,7 @@ async function handle(req: Request): Promise<Response> {
           streams.set(ORCHESTRATOR_STREAM, controller)
           toOrchestrator({ type: 'hello', name: 'orchestrator' })
           for (const p of prompts.answered()) toOrchestrator(answerEvent(p)) // answered while it was away
+          for (const q of questions.held()) toOrchestrator(questionEvent(q)) // still waiting for it
           ping = setInterval(() => {
             if (!toOrchestrator({ type: 'ping' })) clearInterval(ping)
           }, 20_000)
@@ -1190,6 +1234,27 @@ async function handle(req: Request): Promise<Response> {
       return json(await postQuestion(p, access))
     }
 
+    case '/ask/answer': {
+      const { id, text, by } = body as AskAnswerBody
+      if (!id || typeof text !== 'string' || !text.trim() || !by?.trim()) return json({ error: 'id, text and by required' }, 400)
+      const q = questions.get(id)
+      if (!q || !questions.answer(id, text, by.trim())) return json({ ok: false })
+      log(`question ${id} answered by ${by}`)
+      wakeAskWaiters(id)
+      const answered = `🧭 ${by.trim()}: ${safeSnippet(text, 500) ?? text}`
+      // Posted: show the answer under it. Held: the owner never saw it, so show both.
+      if (q.messages.length) await closeQuestion(q, answered)
+      else await sendTo(q.topic, { text: `${questionHeader(q.asker, q.question)}\n\n${answered}` })
+      return json({ ok: true })
+    }
+
+    case '/ask/post': {
+      const { id, note } = body as AskPostBody
+      const q = questions.get(id)
+      if (!q?.held || q.answer) return json({ ok: false })
+      return json(await releaseQuestion(q, note) ? { ok: true } : { error: 'could not post the question to Telegram (see hub.log)' })
+    }
+
     case '/ask/wait': {
       const { id, wait_ms } = body as AskWaitBody
       const collect = (): AskWaitResult | undefined => {
@@ -1253,6 +1318,7 @@ const prunePrompts = () => {
 prunePrompts()
 setInterval(prunePrompts, 60 * 60 * 1000).unref()
 setInterval(pruneQuestions, 60 * 60 * 1000).unref()
+setInterval(() => void releaseOverdue().catch(err => log(`releasing held questions failed: ${err}`)), 5000).unref()
 const sweepInbox = () => {
   const n = cleanInbox(INBOX_DIR, INBOX_MAX_AGE_MS)
   if (n) log(`removed ${n} old inbox file(s)`)

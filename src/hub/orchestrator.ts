@@ -56,6 +56,23 @@ export type OrchestratorEvent =
       reply_to_message_id?: number
     }
   | {
+      /**
+       * An ask_owner question from a session started with TELEGRAM_PLUS_ASK=orchestrator,
+       * held for the orchestrator: answer it with /ask/answer, or post it with /ask/post.
+       * Posted anyway after a few minutes, or at once when no orchestrator is connected.
+       */
+      type: 'question'
+      id: string
+      /** The asking session's TELEGRAM_PLUS_NAME, e.g. shop-12a. */
+      asker: string
+      topic?: string
+      question: string
+      buttons?: string[][]
+      at: number
+      /** When it's posted to the owner if nothing else happens. */
+      until: number
+    }
+  | {
       type: 'prompt_answer'
       id: string
       key?: string
@@ -95,6 +112,11 @@ export type EditNoticeResult =
   | { ok: true; unchanged?: true; plain?: true }
   /** `gone`: the message no longer exists or can't be edited (deleted, too old, not a text message). Post a new one. */
   | { error: string; gone?: true }
+
+/** Answer a held or posted question; the asker gets `text`. `by` is shown under it, e.g. "Lead". `ok: false` if it was already answered. */
+export type AskAnswerBody = { id: string; text: string; by: string }
+/** Post a held question to the owner now, with an optional note under it. `ok: false` if it isn't held anymore. */
+export type AskPostBody = { id: string; note?: string }
 
 export type TopicResult = { chat_id: string; thread_id: number } | { error: string }
 
@@ -159,6 +181,16 @@ export class OrchestratorClient {
    */
   closePrompt(id: string, note: string): Promise<{ ok: boolean }> {
     return this.hub.post('/prompt/close', { id, note })
+  }
+
+  /** Answer a session's question (a `question` event) on the owner's behalf. */
+  answerQuestion(body: AskAnswerBody): Promise<{ ok: boolean } | { error: string }> {
+    return this.hub.post('/ask/answer', body)
+  }
+
+  /** Post a held question to the owner now. */
+  postQuestion(body: AskPostBody): Promise<{ ok: boolean } | { error: string }> {
+    return this.hub.post('/ask/post', body, 120_000)
   }
 
   /** Post text and/or files to a project topic or the owner's DMs. */
