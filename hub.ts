@@ -613,6 +613,16 @@ async function answerPrompt(n: ChannelNotification): Promise<boolean> {
   return finishPrompt(p, { ...(label ? { label } : {}), text: n.content, by, at: Date.now() })
 }
 
+/** Removes a prompt's buttons and posts `text` under it. */
+async function closeWithNote(p: Prompt, text: string): Promise<void> {
+  await dropButtons(p)
+  const anchor = p.messages.filter(m => m.buttons).length ? p.messages.filter(m => m.buttons) : p.messages.slice(-1)
+  await Promise.all(anchor.map(m => bot.api.sendMessage(m.chatId, text, {
+    message_thread_id: m.threadId,
+    reply_parameters: { message_id: m.messageId, allow_sending_without_reply: true },
+  }).catch(() => {})))
+}
+
 async function finishPrompt(p: Prompt, answer: { label?: string; text?: string; by: string; at: number }): Promise<boolean> {
   if (!prompts.answer(p.id, answer)) return true
   log(`prompt ${p.id} answered by ${answer.by}`)
@@ -1126,13 +1136,21 @@ async function handle(req: Request): Promise<Response> {
       const { id, note } = body as { id: string; note?: string }
       const p = prompts.remove(id)
       if (!p) return json({ ok: false })
-      await dropButtons(p)
-      const anchor = p.messages.filter(m => m.buttons).length ? p.messages.filter(m => m.buttons) : p.messages.slice(-1)
-      await Promise.all(anchor.map(m => bot.api.sendMessage(m.chatId, `✖️ ${note?.trim() || 'Withdrawn'}`, {
-        message_thread_id: m.threadId,
-        reply_parameters: { message_id: m.messageId, allow_sending_without_reply: true },
-      }).catch(() => {})))
+      await closeWithNote(p, `✖️ ${note?.trim() || 'Withdrawn'}`)
       log(`prompt ${id} cancelled`)
+      return json({ ok: true })
+    }
+
+    case '/prompt/close': {
+      // Answered somewhere else (e.g. the owner told the orchestrator's lead). A prompt
+      // the owner already answered here is left alone: that answer is on its way.
+      const { id, note } = body as { id: string; note?: string }
+      if (!note?.trim()) return json({ error: 'note required' }, 400)
+      const open = prompts.get(id)
+      if (!open || open.state === 'answered') return json({ ok: false })
+      const p = prompts.remove(id)!
+      await closeWithNote(p, note.trim())
+      log(`prompt ${id} closed`)
       return json({ ok: true })
     }
 

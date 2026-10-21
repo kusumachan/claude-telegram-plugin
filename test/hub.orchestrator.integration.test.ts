@@ -147,6 +147,25 @@ describe('orchestrator API', () => {
     expect(await h.hub.post('/prompt/cancel', { id: r.id })).toEqual({ ok: false })
   })
 
+  test('closing a prompt answered elsewhere removes its buttons and posts the note as is, unless the owner already answered', async () => {
+    const r = promptOf(await h.hub.post<PromptResult>('/prompt', { topic: 'proj', text: 'Spec for task 4', buttons: [['Continue']] }))
+    const msg = await sent(t => t === 'Spec for task 4')
+    expect(await h.hub.post('/prompt/close', { id: r.id, note: '🧭 Lead: Continue' })).toEqual({ ok: true })
+    await h.tg.waitFor(c => c.method === 'editMessageReplyMarkup' && c.params.message_id === msg.result.message_id)
+    const note = await sent(t => t === '🧭 Lead: Continue')
+    expect(note.params.reply_parameters.message_id).toBe(msg.result.message_id)
+    expect(await h.hub.post('/prompt/close', { id: r.id, note: 'again' })).toEqual({ ok: false })
+  })
+
+  test('a prompt the owner tapped first is not closed', async () => {
+    const r = promptOf(await h.hub.post<PromptResult>('/prompt', { topic: 'proj', text: 'Open PR 5?', buttons: [['Open PR']] }))
+    const msg = await sent(t => t === 'Open PR 5?')
+    h.tg.groupTap(USER, GROUP, 'btn:0:0', msg.result.message_id, msg.params.reply_markup, thread)
+    await ev(orch.events, e => e.type === 'prompt_answer' && e.id === r.id)
+    expect(await h.hub.post('/prompt/close', { id: r.id, note: '🧭 Lead: Open PR' })).toEqual({ ok: false })
+    expect(await h.hub.post('/prompt/ack', { id: r.id })).toEqual({ ok: true })
+  })
+
   test('notices go to a project topic, or to DMs without one', async () => {
     const t = await h.hub.post<NoticeResult>('/notice', { topic: 'proj', text: 'PR #12 ready: https://example.com/pr/12' })
     expect('message_ids' in t).toBe(true)

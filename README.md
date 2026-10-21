@@ -344,6 +344,7 @@ The rest of this section is for developers. A separate long-running process on t
 | `POST /prompt` | `{ key?, topic?, text, buttons?, needs_text?, files?, format? }` | `{ id, message_ids }` or `{ error }` |
 | `POST /prompt/ack` | `{ id }` | `{ ok }`: stop re-sending that answer |
 | `POST /prompt/cancel` | `{ id, note? }` | `{ ok }`: buttons removed, `✖️ note` posted under it |
+| `POST /prompt/close` | `{ id, note }` | `{ ok }`: answered elsewhere (e.g. through the orchestrator's lead): buttons removed, `note` posted under it as is. `ok: false` if it's gone or already answered on Telegram |
 | `POST /notice` | `{ topic?, text?, files?, format? }` | `{ message_ids, messages: [{ chat_id, message_id, thread_id? }] }` or `{ error }` |
 | `POST /notice/edit` | `{ chat_id, message_id, text, format? }` (one of the `messages` above) | `{ ok, unchanged?, plain? }` or `{ error, gone? }` |
 | `POST /topic/ensure` | `{ topic }` | `{ chat_id, thread_id }` or `{ error }` |

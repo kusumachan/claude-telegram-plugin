@@ -152,6 +152,15 @@ export class OrchestratorClient {
     return this.hub.post('/prompt/cancel', { id, note })
   }
 
+  /**
+   * Close an open prompt that was answered somewhere else, e.g. relayed by the
+   * orchestrator's lead: its buttons go away and `note` is posted under it as is.
+   * `ok: false` when it's gone or the owner already answered it on Telegram.
+   */
+  closePrompt(id: string, note: string): Promise<{ ok: boolean }> {
+    return this.hub.post('/prompt/close', { id, note })
+  }
+
   /** Post text and/or files to a project topic or the owner's DMs. */
   notice(body: NoticeBody): Promise<NoticeResult> {
     return this.hub.post('/notice', body, 120_000)
