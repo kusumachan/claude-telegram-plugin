@@ -98,6 +98,11 @@ export type EditNoticeResult =
 
 export type TopicResult = { chat_id: string; thread_id: number } | { error: string }
 
+/** A message for a running agent (an inbox session). `name` is its TELEGRAM_PLUS_NAME; `by` names the sender, e.g. "the orchestrator's lead". */
+export type InboxSendBody = { name: string; text: string; by: string }
+/** `queued`: how many messages wait for that session now. */
+export type InboxSendResult = { ok: true; queued: number } | { error: string }
+
 // --- client ------------------------------------------------------------------------
 
 export class OrchestratorClient {
@@ -155,6 +160,15 @@ export class OrchestratorClient {
   /** Replace the text of a message a notice sent (e.g. a status line edited in place). Pass a ref from notice(). */
   editNotice(body: EditNoticeBody): Promise<EditNoticeResult> {
     return this.hub.post('/notice/edit', body)
+  }
+
+  /**
+   * Queue a message for a running agent session (an inbox session, by its
+   * TELEGRAM_PLUS_NAME). It's delivered after the agent's current tool call
+   * or turn, labelled as coming from `by`, not from the owner.
+   */
+  sendToAgent(body: InboxSendBody): Promise<InboxSendResult> {
+    return this.hub.post('/inbox/send', body)
   }
 
   /** Make sure a project has a forum topic; returns where it is. */

@@ -35,6 +35,8 @@ import { type InboxConnectBody, type InboxMessage, type InboxTakeBody, type Inbo
 import {
   type EditNoticeBody,
   type EditNoticeResult,
+  type InboxSendBody,
+  type InboxSendResult,
   type NoticeBody,
   type NoticeResult,
   ORCHESTRATOR_COMMANDS,
@@ -445,9 +447,10 @@ function takeInbox(sessionId: string): InboxMessage[] {
 
 /** The session ended: tell the owner what it never read. */
 async function closeInbox(s: InboxSession): Promise<void> {
-  if (s.queue.length === 0) return
+  if (!s.queue.some(m => m.chatId)) return
   const byChat = new Map<string, InboxMessage[]>()
-  for (const m of s.queue) byChat.set(`${m.chatId}:${m.threadId ?? ''}`, [...(byChat.get(`${m.chatId}:${m.threadId ?? ''}`) ?? []), m])
+  // Relayed messages have no Telegram message to reply to; the orchestrator that sent them tracks its sessions.
+  for (const m of s.queue.filter(m => m.chatId)) byChat.set(`${m.chatId}:${m.threadId ?? ''}`, [...(byChat.get(`${m.chatId}:${m.threadId ?? ''}`) ?? []), m])
   for (const ms of byChat.values()) {
     const first = ms[0]!
     await bot.api.sendMessage(first.chatId,
@@ -1071,7 +1074,18 @@ async function handle(req: Request): Promise<Response> {
 
     case '/inbox/take': {
       const { session_id } = body as InboxTakeBody
-      return json({ messages: takeInbox(session_id).map(m => ({ text: m.text, by: m.by })) } satisfies InboxTakeResult)
+      return json({ messages: takeInbox(session_id).map(m => ({ text: m.text, by: m.by, ...(m.relayed ? { relayed: true as const } : {}) })) } satisfies InboxTakeResult)
+    }
+
+    case '/inbox/send': {
+      const p = body as InboxSendBody
+      if (!p.name || !p.text?.trim() || !p.by) return json({ error: 'name, text and by required' } satisfies InboxSendResult)
+      const target = [...inboxSessions.values()].find(x => x.name === p.name)
+      if (!target) return json({ error: `${p.name} isn't connected` } satisfies InboxSendResult)
+      if (target.queue.length >= MAX_INBOX_QUEUE) return json({ error: `${p.name} already has ${MAX_INBOX_QUEUE} unread messages` } satisfies InboxSendResult)
+      target.queue.push({ chatId: '', messageId: 0, text: p.text, by: p.by, relayed: true, at: Date.now() })
+      log(`queued a relayed message for ${target.name} (${target.queue.length} waiting)`)
+      return json({ ok: true, queued: target.queue.length } satisfies InboxSendResult)
     }
 
     case '/orchestrator/connect': {

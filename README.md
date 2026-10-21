@@ -272,10 +272,11 @@ What reaches the inbox, from allowlisted users only:
 - Any message in its project topic (`TELEGRAM_PLUS_TOPIC`, else the folder) when it's the only inbox session there. With several, a plain message gets a "reply to a message from the one you mean" hint.
 - A plain message still answers the single open `ask_owner` question in that topic first.
 - Text only. Attachments get "Attachments aren't supported for agents."
+- A message the orchestrator relays with `POST /inbox/send` (for example from its lead), addressed by the session's `TELEGRAM_PLUS_NAME`.
 
-The model sees `Message from the owner on Telegram (@you):\n<text>`, or for several at once `N messages from the owner on Telegram (@you), oldest first:\n[1] …\n[2] …`.
+The model sees `Message from the owner on Telegram (@you):\n<text>`, or for several at once `N messages from the owner on Telegram (@you), oldest first:\n[1] …\n[2] …`. A relayed message is labelled with its sender instead (`Message from the orchestrator's lead:\n<text>`), and a batch from several senders labels each line.
 
-Feedback in Telegram: 👀 when queued, 👍 when delivered to the agent. If the session ends with messages still queued, the bot replies to them saying they weren't delivered. The queue lives in the hub's memory, so a hub restart drops it.
+Feedback in Telegram: 👀 when queued, 👍 when delivered to the agent. If the session ends with messages still queued, the bot replies to them saying they weren't delivered. Relayed messages get neither: they have no Telegram message. The queue lives in the hub's memory, so a hub restart drops it.
 
 The hooks run after every tool call in every session, but without `TELEGRAM_PLUS_INBOX` they exit in the shell before starting anything. With it, they make one local socket call and never start the hub.
 
@@ -340,6 +341,7 @@ The rest of this section is for developers. A separate long-running process on t
 | `POST /notice` | `{ topic?, text?, files?, format? }` | `{ message_ids, messages: [{ chat_id, message_id, thread_id? }] }` or `{ error }` |
 | `POST /notice/edit` | `{ chat_id, message_id, text, format? }` (one of the `messages` above) | `{ ok, unchanged?, plain? }` or `{ error, gone? }` |
 | `POST /topic/ensure` | `{ topic }` | `{ chat_id, thread_id }` or `{ error }` |
+| `POST /inbox/send` | `{ name, text, by }` | `{ ok, queued }` or `{ error }`: queued for the inbox session called `name`, labelled as from `by` ([inbox](#messaging-a-running-agent-inbox)) |
 
 `topic` is a project key (as in `topics.json`). Without one, or when the topic can't be used, messages go to allowlisted DMs.
 

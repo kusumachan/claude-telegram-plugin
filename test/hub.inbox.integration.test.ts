@@ -7,7 +7,8 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
 import type { AskResult, AskWaitResult } from '../src/ask.ts'
-import type { InboxTakeResult } from '../src/inbox.ts'
+import type { InboxSendResult } from '../src/hub/orchestrator.ts'
+import { formatInbox, type InboxTakeResult } from '../src/inbox.ts'
 import { type Harness, startHub } from './hub-harness.ts'
 
 const USER = 42
@@ -124,6 +125,20 @@ describe('owner-message inbox', () => {
     await Bun.sleep(100)
   })
 
+  test('the orchestrator can relay a message to a session by name; it is labelled as relayed', async () => {
+    const send = (body: object) => h.hub.post<InboxSendResult>('/inbox/send', body)
+    expect(await send({ name: 'proj-1A', text: 'the owner says: use postgres', by: "the orchestrator's lead" })).toEqual({ ok: true, queued: 1 })
+    const m = h.tg.groupMsg(USER, GROUP, 'and keep it small', thread)
+    await reacted(m, '👀')
+    const r = await runHook(h.dir, postToolUse('sess-A'))
+    expect(r.json.hookSpecificOutput.additionalContext).toBe(
+      "2 messages, oldest first:\n[1] (the orchestrator's lead) the owner says: use postgres\n[2] (the owner on Telegram (@user42)) and keep it small",
+    )
+    expect(await send({ name: 'proj-9Z', text: 'hi', by: 'lead' })).toEqual({ error: "proj-9Z isn't connected" })
+    expect(await send({ name: 'proj-1A', text: ' ', by: 'lead' })).toEqual({ error: 'name, text and by required' })
+    expect(formatInbox([{ text: 'stop', by: "the orchestrator's lead", relayed: true }])).toBe("Message from the orchestrator's lead:\nstop")
+  })
+
   test('attachments are refused; strangers are not queued', async () => {
     h.tg.groupDocument(USER, GROUP, 'see attached', thread)
     await h.tg.waitFor(c => c.method === 'sendMessage' && /Attachments aren't supported for agents/.test(c.params.text))
@@ -135,6 +150,8 @@ describe('owner-message inbox', () => {
   test('a session that ends with unread messages tells the owner they were not delivered', async () => {
     const m = h.tg.groupMsg(USER, GROUP, 'one more thing', thread)
     await reacted(m, '👀')
+    // A relayed message waiting too isn't counted: it has no Telegram message to reply to.
+    await h.hub.post('/inbox/send', { name: 'proj-1A', text: 'from the lead', by: 'lead' })
     agentA.close()
     const notice = await h.tg.waitFor(c => c.method === 'sendMessage' && /proj-1A ended before reading your message/.test(c.params.text))
     expect(notice.params.message_thread_id).toBe(thread)
