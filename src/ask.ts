@@ -55,10 +55,26 @@ export type Question = {
   askedAt: number
   messages: QuestionMessage[]
   answer?: { text: string; by: string; at: number }
+  /** Where it's posted: the project topic, else DMs. Kept for a held question, which is posted later. */
+  topic?: string
+  buttons?: string[][]
+  /**
+   * Held for the orchestrator (TELEGRAM_PLUS_ASK=orchestrator): not posted yet,
+   * because its lead may answer it. Posted when the orchestrator says so, or at `until`.
+   */
+  held?: { until: number }
 }
 
+/** How long a question waits for the orchestrator before it's posted anyway. */
+export const ASK_HOLD_MS = 3 * 60 * 1000
+
+/** The asking session's env: `orchestrator` sends its questions to the orchestrator first. */
+export const ASK_ENV = 'TELEGRAM_PLUS_ASK'
+export const askVia = (env: NodeJS.ProcessEnv = process.env): 'orchestrator' | undefined =>
+  env[ASK_ENV]?.trim().toLowerCase() === 'orchestrator' ? 'orchestrator' : undefined
+
 /** The ask_owner wire types between the MCP server and the hub. */
-export type AskBody = { session: string; asker: string; topic: string; question: string; buttons?: string[][] }
+export type AskBody = { session: string; asker: string; topic: string; question: string; buttons?: string[][]; via?: 'orchestrator' }
 export type AskResult = { id: string } | { error: string }
 export type AskWaitBody = { id: string; wait_ms: number }
 export type AskWaitResult =
@@ -126,6 +142,20 @@ export class QuestionStore {
   /** Unanswered questions posted in this chat (and forum topic). */
   openIn(chatId: string, threadId: number | undefined): Question[] {
     return this.questions.filter(q => !q.answer && q.messages.some(m => m.chatId === chatId && m.threadId === threadId))
+  }
+
+  /** Held questions, oldest first. */
+  held(): Question[] {
+    return this.questions.filter(q => q.held && !q.answer)
+  }
+
+  /** A held question was posted: it's an ordinary open question from now on. */
+  release(id: string, messages: QuestionMessage[]): void {
+    const q = this.get(id)
+    if (!q) return
+    delete q.held
+    q.messages = messages
+    this.write()
   }
 
   /** Record the owner's answer. False if it was already answered. */

@@ -251,6 +251,8 @@ Any session with the plugin enabled, including one not started with the launcher
 /telegram-plus:access set askTimeoutMinutes 60
 ```
 
+**Questions the orchestrator sees first.** A session started with `TELEGRAM_PLUS_ASK=orchestrator` (claude-orchestrator's agents) doesn't post its question right away while an orchestrator is connected. The hub holds it and sends it to the orchestrator as a `question` event. The orchestrator answers it (`/ask/answer`) or posts it to the owner (`/ask/post`, with an optional note). A held question is posted anyway after 3 minutes, and at once when no orchestrator is connected. When the orchestrator answers a question the owner never saw, the hub posts the question and the answer in the topic, so the owner sees every answer given for them.
+
 ## Messaging a running agent (inbox)
 
 A session that isn't a channel session can't receive Telegram messages. With `TELEGRAM_PLUS_INBOX=1` in its environment it gets an inbox instead:
@@ -320,7 +322,7 @@ The channel session itself is skipped, since there Claude already talks to you o
 /telegram-plus:access set notifyPreview off           # don't include Claude's message text
 ```
 
-One session can be quieter than the rest with `TELEGRAM_PLUS_NOTIFY` in its environment: `attention` keeps only the notices that mean it's stuck (a permission prompt, a question) and drops "finished" and idle, and `off` sends none. It's for sessions another program already reports on; claude-orchestrator starts its agents with `attention`.
+One session can be quieter than the rest with `TELEGRAM_PLUS_NOTIFY` in its environment: `attention` keeps only the notices that mean it's stuck (a permission prompt, a question) and drops "finished" and idle, and `off` sends none. It's for sessions another program already reports on; claude-orchestrator starts its agents with `attention`. Likewise `TELEGRAM_PLUS_ASK=orchestrator` sends a session's `ask_owner` questions to the orchestrator first ([below](#asking-the-owner-ask_owner)).
 
 ```
 TELEGRAM_PLUS_NOTIFY=attention claude
@@ -340,7 +342,7 @@ The rest of this section is for developers. A separate long-running process on t
 
 | Endpoint | Body | Returns |
 | --- | --- | --- |
-| `POST /orchestrator/connect` | `{}` | NDJSON stream: `hello`, `ping`, `command`, `message`, `prompt_answer`. One orchestrator at a time: the newest connection wins. |
+| `POST /orchestrator/connect` | `{}` | NDJSON stream: `hello`, `ping`, `command`, `message`, `prompt_answer`, `question` (held `ask_owner` questions, sent again on reconnect). One orchestrator at a time: the newest connection wins. |
 | `POST /prompt` | `{ key?, topic?, text, buttons?, needs_text?, files?, format? }` | `{ id, message_ids }` or `{ error }` |
 | `POST /prompt/ack` | `{ id }` | `{ ok }`: stop re-sending that answer |
 | `POST /prompt/cancel` | `{ id, note? }` | `{ ok }`: buttons removed, `✖️ note` posted under it |
@@ -348,6 +350,8 @@ The rest of this section is for developers. A separate long-running process on t
 | `POST /notice` | `{ topic?, text?, files?, format? }` | `{ message_ids, messages: [{ chat_id, message_id, thread_id? }] }` or `{ error }` |
 | `POST /notice/edit` | `{ chat_id, message_id, text, format? }` (one of the `messages` above) | `{ ok, unchanged?, plain? }` or `{ error, gone? }` |
 | `POST /topic/ensure` | `{ topic }` | `{ chat_id, thread_id }` or `{ error }` |
+| `POST /ask/answer` | `{ id, text, by }` | `{ ok }`: answers a `question` event's question; the asker gets `text`. A held one is posted with the answer under it as `🧭 by: text`, a posted one shows it under the question. `ok: false` if already answered |
+| `POST /ask/post` | `{ id, note? }` | `{ ok }`: posts a held question to the owner now, with `🧭 note` under it. `ok: false` if it isn't held anymore |
 | `POST /inbox/send` | `{ name, text, by }` | `{ ok, queued }` or `{ error }`: queued for the inbox session called `name`, labelled as from `by` ([inbox](#messaging-a-running-agent-inbox)) |
 
 `topic` is a project key (as in `topics.json`). Without one, or when the topic can't be used, messages go to allowlisted DMs.

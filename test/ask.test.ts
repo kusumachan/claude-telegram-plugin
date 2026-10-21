@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'fs'
-import { parseAskButtons, QuestionStore } from '../src/ask.ts'
+import { askVia, parseAskButtons, QuestionStore } from '../src/ask.ts'
 import { controlTopic, isControlTopic, sessionTopic } from '../src/topics.ts'
 
 let dir: string
@@ -95,4 +95,10 @@ describe('control topic', () => {
     expect(isControlTopic({ orchestratorTopic: 'Control' }, 'Orchestrator')).toBe(false)
     expect(isControlTopic({}, undefined)).toBe(false)
   })
+})
+
+test('askVia reads TELEGRAM_PLUS_ASK', () => {
+  expect(askVia({})).toBeUndefined()
+  expect(askVia({ TELEGRAM_PLUS_ASK: ' Orchestrator ' })).toBe('orchestrator')
+  expect(askVia({ TELEGRAM_PLUS_ASK: 'owner' })).toBeUndefined()
 })

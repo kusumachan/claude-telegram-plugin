@@ -28,6 +28,7 @@ import {
   DEFAULT_ASK_TIMEOUT_MINUTES,
   NO_ANSWER_YET,
   parseAskButtons,
+  askVia,
 } from './src/ask.ts'
 import { isChannelSession } from './src/channel-mode.ts'
 import { type InboxConnectBody, inboxEnabled } from './src/inbox.ts'
@@ -60,7 +61,7 @@ const CWD = process.env.CLAUDE_PROJECT_DIR ?? process.cwd()
 const SESSION_NAME = process.env.TELEGRAM_PLUS_NAME ?? basename(CWD)
 
 const mcp = new Server(
-  { name: 'telegram-plus', version: '0.6.7' },
+  { name: 'telegram-plus', version: '0.6.8' },
   {
     capabilities: {
       tools: {},
@@ -175,7 +176,7 @@ async function askOwner(args: Record<string, unknown>, progressToken: string | n
 
   const ask = async (): Promise<AskResult> => {
     await hub.ensure()
-    return hub.post<AskResult>('/ask', { session: SESSION_ID, asker: SESSION_NAME, topic: sessionTopic(CWD), question, buttons })
+    return hub.post<AskResult>('/ask', { session: SESSION_ID, asker: SESSION_NAME, topic: sessionTopic(CWD), question, buttons, via: askVia() })
   }
 
   try {
