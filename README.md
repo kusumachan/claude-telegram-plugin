@@ -320,11 +320,17 @@ The channel session itself is skipped, since there Claude already talks to you o
 /telegram-plus:access set notifyPreview off           # don't include Claude's message text
 ```
 
+One session can be quieter than the rest with `TELEGRAM_PLUS_NOTIFY` in its environment: `attention` keeps only the notices that mean it's stuck (a permission prompt, a question) and drops "finished" and idle, and `off` sends none. It's for sessions another program already reports on; claude-orchestrator starts its agents with `attention`.
+
+```
+TELEGRAM_PLUS_NOTIFY=attention claude
+```
+
 In `-p` (headless) runs Claude Code cancels async hooks at teardown, so a "finished" notice may not arrive.
 
 ## Orchestrator API
 
-**What it's for.** [claude-orchestrator](https://github.com/kusumachan/claude-orchestrator) turns one Telegram message into a pull request. You send `/task add a wishlist` in a project's topic, and it runs Claude Code sessions to analyze, build, review and test the change, asking you on Telegram at the gates you choose. It needs this plugin with a topics group ([Part 2](#part-2-optional-one-topic-per-project)). It creates the 🎛 Orchestrator control topic itself the first time it connects. You don't need `claude-tg` for it: its agents are plain `claude` sessions that use `TELEGRAM_PLUS_TOPIC` and `TELEGRAM_PLUS_INBOX`. To install it, see claude-orchestrator's `docs/installation.md`.
+**What it's for.** [claude-orchestrator](https://github.com/kusumachan/claude-orchestrator) turns one Telegram message into a pull request. You send `/task add a wishlist` in a project's topic, and it runs Claude Code sessions to analyze, build, review and test the change, asking you on Telegram at the gates you choose. It needs this plugin with a topics group ([Part 2](#part-2-optional-one-topic-per-project)). It creates the 🎛 Orchestrator control topic itself the first time it connects. You don't need `claude-tg` for it: its agents are plain `claude` sessions that use `TELEGRAM_PLUS_TOPIC`, `TELEGRAM_PLUS_INBOX` and `TELEGRAM_PLUS_NOTIFY`. To install it, see claude-orchestrator's `docs/installation.md`.
 
 The rest of this section is for developers. A separate long-running process on the same machine (an orchestrator that runs Claude Code sessions for tasks) can use the hub too: [`src/hub/orchestrator.ts`](src/hub/orchestrator.ts) has the wire types and a small `OrchestratorClient`. It uses the same transport as everything else: HTTP over the hub's 0700 unix socket.
 
