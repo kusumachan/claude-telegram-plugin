@@ -73,6 +73,19 @@ export type OrchestratorEvent =
       until: number
     }
   | {
+      /**
+       * The owner wrote to a running inbox session (an agent) in its topic: a copy, so
+       * the orchestrator knows what its agents were told. Sent only while it's connected.
+       */
+      type: 'agent_message'
+      /** The session's TELEGRAM_PLUS_NAME, e.g. shop-12a. */
+      name: string
+      topic: string
+      text: string
+      by: string
+      at: number
+    }
+  | {
       type: 'prompt_answer'
       id: string
       key?: string
